@@ -243,9 +243,9 @@ class Window(QSplitter):
 
 
 if __name__ == '__main__':
-    import sys
-
-    app = QApplication([])
+    app = QApplication.instance()
+    if app is None:
+        app = QApplication([])
     win = Window()
     win.show()
-    sys.exit(app.exec_())
+    app.exec_()
