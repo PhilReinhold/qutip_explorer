@@ -10,7 +10,7 @@ sip.setapi('QVariant', 2)
 
 from PyQt4.QtCore import QAbstractItemModel, QAbstractTableModel, Qt
 from PyQt4.QtGui import QApplication, QWidget, QHBoxLayout, QVBoxLayout, QPushButton, QSplitter, QSpinBox, QTabWidget, \
-    QTableView, QLabel, QFormLayout
+    QTableView, QLabel, QFormLayout, QMainWindow, QProgressBar, QStatusBar
 from numpy import linspace
 from pyqtgraph import ImageView
 from traits.api import HasTraits, Int, Float, ListComplex, Str
@@ -39,11 +39,11 @@ class ModeParameters(HasTraits):
     def update_leg_phases(self):
         n = self.initial_leg_count
         l = list(self.initial_leg_phases)
-        dlen = n - len(l)
-        if dlen >= 0:
-            self.initial_leg_phases.extend([1]*dlen)
+        len_diff = n - len(l)
+        if len_diff >= 0:
+            self.initial_leg_phases.extend([1]*len_diff)
         else:
-            del self.initial_leg_phases[dlen:]
+            del self.initial_leg_phases[len_diff:]
 
 
 ModeView = View(Group(
@@ -124,11 +124,13 @@ OutputView = View(Group(
 ))
 
 
-class Window(QSplitter):
+class Window(QMainWindow):
     def __init__(self):
         super(Window, self).__init__()
+        split = QSplitter()
+        self.setCentralWidget(split)
         side_bar = QWidget()
-        self.addWidget(side_bar)
+        split.addWidget(side_bar)
         layout = QVBoxLayout(side_bar)
         self.mode_count_spin = QSpinBox()
         self.mode_count_spin.setValue(1)
@@ -153,15 +155,23 @@ class Window(QSplitter):
         calc_button.clicked.connect(self.run_simulation)
         self.image_view = None
 
+        self.status_label = QLabel("")
+        self.progress_bar = QProgressBar()
+        self.statusBar().addWidget(self.status_label)
+        self.statusBar().addWidget(self.progress_bar, 1)
+
         self.update_count()
 
-    def add_image_view(self):
+    def add_image_view(self, data):
         self.image_view = ImageView()
         self.image_view.ui.histogram.gradient.restoreState(
             {"ticks": [(0.0, (255, 0, 0)), (0.5, (255, 255, 255)), (1.0, (0, 0, 255))], "mode": "rgb"})
-        self.addWidget(self.image_view)
+        self.image_view.setImage(data)
+        split = self.centralWidget()
+        split.addWidget(self.image_view)
+        QApplication.instance().processEvents()
         self.resize(1250, self.height())
-        self.setSizes([250, 1000])
+        split.setSizes([250, 1000])
 
 
     def update_count(self):
@@ -183,6 +193,13 @@ class Window(QSplitter):
         for i, (m, mw) in enumerate(self.modes):
             self.mode_box.setTabText(i, m.name)
 
+    def set_status(self, msg):
+        self.status_label.setText(msg)
+        QApplication.instance().processEvents()
+
+    def set_progress(self, percent):
+        self.progress_bar.setValue(percent)
+        QApplication.instance().processEvents()
 
     def run_simulation(self):
         modes = [m for m, mw in self.modes]
@@ -230,16 +247,25 @@ class Window(QSplitter):
 
         psi0 = tensor(*psi0_list)
         out = self.output
-        tlist = linspace(0, out.time, out.steps)
-        result = mesolve(H, psi0, tlist, c_ops, [], args)
+        times = linspace(0, out.time, out.steps)
+        self.set_status("Computing States")
+        result = mesolve(H, psi0, times, c_ops, [], args)
         axis = linspace(-out.wigner_range, out.wigner_range, out.wigner_resolution)
-        wigners = array([wigner(s, axis, axis) for s in result.states])
+        wigners = []
+        self.set_status("Computing Wigners")
+        for i, s in enumerate(result.states):
+            wigners.append(wigner(s, axis, axis))
+            self.set_progress(int(100*i/out.steps))
+        wigners = np.array(wigners)
+        self.set_progress(0)
+        self.set_status("")
 
         if not self.image_view:
-            self.add_image_view()
-        self.image_view.setImage(wigners)
-        maxval = abs(wigners).max()
-        self.image_view.setLevels(-maxval, maxval)
+            self.add_image_view(wigners)
+        else:
+            self.image_view.setImage(wigners)
+        max_value = abs(wigners).max()
+        self.image_view.setLevels(-max_value, max_value)
 
 
 if __name__ == '__main__':
