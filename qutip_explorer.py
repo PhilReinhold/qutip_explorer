@@ -1,16 +1,18 @@
-from PyQt4.QtCore import Qt, QObject, pyqtSignal
-from PyQt4.QtGui import QApplication, QWidget, QHBoxLayout, QPushButton, QSplitter, QTabWidget, \
-    QLabel, QMainWindow, QProgressBar, QPixmap, QFocusEvent, QGroupBox, QRadioButton, QDockWidget
+from PyQt4.QtGui import QApplication, QMainWindow, QProgressBar, QGroupBox, QRadioButton, QDockWidget
 from numpy import linspace
-from pyqtgraph import ImageView
-from pyqtgraph.dockarea import DockArea
+from pyqtgraph import ImageView, PlotWidget
+from pyqtgraph.dockarea import DockArea, Dock
 from qutip import *
-from copy import copy
 from interface_helpers import *
 
 
+class ModeItemEmitter(QObject):
+    mode_form_focus_in = pyqtSignal(str)
+    mode_form_focus_out = pyqtSignal(str)
+
+
 class ModeItem(FormItem):
-    def __init__(self):
+    def __init__(self, group):
         super(ModeItem, self).__init__("Mode", [
             ("dimension", int, 2),
             ("frequency", float, 1),
@@ -19,18 +21,70 @@ class ModeItem(FormItem):
             ("dephasing", float, 0),
             ("drive amplitude", float, 0),
             ("drive angle", float, 0),
-            ("initial state", int, 0),
+            ("fock state", int, 0),
             ("initial displacement", float, 0),
-            ("initial leg count", int, 1),
+            ("leg count", int, 1),
         ])
-
+        self.group = group
         # Initial-leg-phases
+
+        eqn_associations = {
+            "Frequency": "freq",
+            "Anharmonicity": "kerr",
+            "Decay": "decay",
+            "Dephasing": "dephasing",
+            "Drive Amplitude": "drive_amp",
+            "Drive Angle": "drive_phase",
+            "Initial State": "init_state",
+            "Initial Displacement": "displacement",
+            "Leg Count": "leg_count",
+            # ("Initial Leg Phases", "leg_phase"),
+        }
+
+        def mode_hover_changed(idx):
+            name = self.params_model.item(idx.row(), 0).text()
+            win.set_eqn(eqn_associations.get(str(name), ""))
+
+        self.params_widget.setMouseTracking(True)
+        self.params_widget.entered.connect(mode_hover_changed)
+        self.params_widget.leaveEvent = lambda e: win.set_eqn("")
+
+    def tensor_index(self):
+        return self.group.items_list().index(self)
+
+    def hamiltonian(self):
+        a = destroy(self.dimension)
+        ad = a.dag()
+        f0 = self.frequency
+        k = self.anharmonicity
+        return f0*ad*a + k*ad*ad*a*a
+
+    def drive_hamiltonian(self):
+        a = destroy(self.dimension)
+        ad = a.dag()
+        th = self.drive_angle
+        amp = self.drive_amplitude
+        return amp*(exp(1j*th)*ad + exp(-1j*th)*a)
+
+    def initial_state(self):
+        alpha = self.initial_displacement
+        leg_angle = exp(2j*pi/self.leg_count)
+        init_state = basis(self.dimension, self.fock_state)
+        # leg_phases = list(m.initial_leg_phases)
+        # leg_phases += [1]*(m.initial_leg_count - len(leg_phases))
+        disp_op = lambda n: displace(self.dimension, alpha*leg_angle**n)
+        return sum(disp_op(n)*init_state for n in range(self.leg_count))
+
+    def collapse_ops(self):
+        a = destroy(self.dimension)
+        return [self.decay*a, self.dephasing*a.dag()*a]
 
 
 class CrossModeGroupItem(GroupItem):
-    def __init__(self):
+    def __init__(self, modes_item):
         super(CrossModeGroupItem, self).__init__("Cross-Mode Terms", "Cross-Mode Term", CrossModeItem)
-        # self.context_menu = ActionsMenu([("Add Cross-Mode Term", self.add_term)])
+        self.modes_item = modes_item
+        self.context_menu.add_action('Add Terms From Matrix', self.add_from_matrix)
 
         self.array_model = UpperHalfArrayModel()
         array_view = QTableView()
@@ -44,107 +98,258 @@ class CrossModeGroupItem(GroupItem):
         type_layout.addWidget(self.xx_type_radio)
         self.dialog = OKCancelDialog(QLabel("Mode Array"), array_view, type_group)
 
-    def add_item(self):
-        self.array_model.set_n(self.parent().mode_count)
+    def add_from_matrix(self):
+        self.array_model.set_n(self.modes_item.rowCount())
+        names = [m.text() for m in self.modes_item.items_list()]
+        self.array_model.setHorizontalHeaderLabels(names)
+        self.array_model.setVerticalHeaderLabels(names)
         if self.dialog.exec_():
             if self.cross_kerr_type_radio.isChecked():
                 type_str = "Cross-Kerr"
             elif self.xx_type_radio.isChecked():
                 type_str = "X-X"
+            else:
+                return
             for i, row in enumerate(self.array_model.array):
                 for j, val in enumerate(row):
                     if val:
-                        self.appendRow(CrossModeItem(type_str, val, i + 1, j + 1))
+                        self.appendRow(CrossModeItem(type_str, val, i, j, self.modes_item))
 
 
 class CrossModeItem(FormItem):
-    def __init__(self, type, val, mode_1, mode_2):
-        name = type + str((mode_1, mode_2))
+    def __init__(self, group, term_type="Cross-Kerr", val=1, mode_1=0, mode_2=1):
+        name = term_type + str((mode_1, mode_2))
+        modes = group.modes_item.items_list()
         super(CrossModeItem, self).__init__(name, [
-            ("type", ["Cross-Kerr", "X-X"], type),
+            ("term type", ["Cross-Kerr", "X-X"], term_type),
             ("strength", float, val),
-            ("mode 1", int, mode_1),
-            ("mode 2", int, mode_2),
+            ("mode 1", group.modes_item, modes[mode_1].text()),
+            ("mode 2", group.modes_item, modes[mode_2].text()),
         ])
+
+    def hamiltonian(self, mode_list):
+        ops_list = [qeye(m.dimension) for m in mode_list]
+        if self.term_type == "Cross-Kerr":
+            n1 = num(self.mode_list[self.mode_1 - 1].dimension)
+            n2 = num(self.mode_list[self.mode_2 - 1].dimension)
+            ops_list[self.mode_1 - 1] = n1
+            ops_list[self.mode_2 - 1] = n2
+            return tensor(*ops_list)
+        if self.term_type == "X-X":
+            a1 = destroy(self.mode_list[self.mode_1 - 1].dimension)
+            a2 = destroy(self.mode_list[self.mode_2 - 1].dimension)
+            ops_list[self.mode_1 - 1] = a1
+            ops_list[self.mode_2 - 1] = a2.dag()
+            return tensor(*ops_list) + tensor(*ops_list).dag()
+
+
+class OutputsGroupItem(GroupItem):
+    def __init__(self, modes_item, sims_item):
+        super(OutputsGroupItem, self).__init__("Outputs", "Output", OutputItem)
+        self.sims_item = sims_item
+        self.modes_item = modes_item
+
+
+class MyImageView(ImageView):
+    def __init__(self):
+        super(MyImageView, self).__init__()
+        self.ui.histogram.gradient.restoreState(
+            {"ticks": [(0.0, (255, 0, 0)), (0.5, (255, 255, 255)), (1.0, (0, 0, 255))], "mode": "rgb"}
+        )
+
+    def setImage(self, img, **kwargs):
+        super(MyImageView, self).setImage(img, **kwargs)
+        max_value = abs(img).max()
+        self.setLevels(-max_value, max_value)
 
 
 class OutputItem(FormItem):
-    def __init__(self):
+    def __init__(self, group):
         super(OutputItem, self).__init__("Output", [
-            ("Mode", int, 1),
-            ("Type", ["Wigner", "Expect-XYZ"], "Wigner")
+            ("simulation", group.sims_item, group.sims_item.items_list()[0].name()),
+            ("mode", group.modes_item, group.modes_item.items_list()[0].name()),
+            ("report type", ["Wigner", "Expect-XYZ"], "Wigner"),
+            ("wigner range", float, 5),
+            ("wigner resolution", int, 100),
         ])
+
+        self.context_menu.add_action("Re-Compute", self.compute)
+        self.data = None
+        self.dock = None
+        self.plot = None
+
+    def compute(self):
+        win.set_status("Computing Output %s" % self.name())
+        output_steps = []
+        if self.report_type == "Wigner":
+            dx = self.wigner_range
+            nx = self.wigner_resolution
+            axis = linspace(-dx, dx, nx)
+            step_function = lambda state: wigner(state, axis, axis)
+        else:
+            step_function = lambda state: [expect(state, jmat(2, d)) for d in 'xyz']
+
+        n_states = len(self.simulation.states)
+        for i, s in enumerate(self.simulation.states):
+            output_steps.append(step_function(s.ptrace(self.mode.tensor_index())))
+            win.set_progress(i/n_states)
+        win.set_status("")
+
+        self.data = np.array(output_steps)
+        if self.report_type == "Wigner":
+            self.plot_wigner()
+        elif self.report_type == "Expect-XYZ":
+            self.plot_xyz()
+
+    def plot_type(self):
+        return {
+            "Wigner": MyImageView,
+            "Expect-XYZ": PlotWidget,
+        }[self.report_type]
+
+    def check_dock(self):
+        if self.dock is None:
+            self.plot = self.plot_type()()
+            self.dock = Dock(self.name(), widget=self.plot)
+            win.outputs_dock_area.addDock(self.dock)
+
+    def plot_wigner(self):
+        self.check_dock()
+        if not isinstance(self.plot, ImageView):
+            self.plot.setParent(None)
+            self.plot = ImageView()
+        self.plot.setImage(self.data)
+
+    def plot_xyz(self):
+        pass
 
 
 class PulseItem(FormItem):
     def __init__(self):
         super(PulseItem, self).__init__("Pulse", [
-            ("Frequency", float, 1),
-            ("Amplitude", float, 1),
-            ("Profile", ["Square", "Gaussian"], "Square"),
-            ("Duration", float, 1),
+            ("frequency", float, 1),
+            ("amplitude", float, 1),
+            ("phase", float, 1),
+            ("profile", ["Square", "Gaussian"], "Square"),
+            ("duration", float, 1),
+            ("sigma", float, 1),
         ])
+
+    def time_dependence(self):
+        td_str = "amp*cos(omega * t + phi)"
+        args = {'amp': self.amplitude, 'omega': self.frequency}
+        if self.profile == "Gaussian":
+            td_str += "*exp((t-t0)**2/sigma**2)"
+            args['t0'] = self.duration/2.
+            args['sigma'] = self.sigma
+        return td_str
 
 
 class SimulationItem(FormItem):
     def __init__(self):
         super(SimulationItem, self).__init__("Simulation", [
-            ("Time", float, 10),
-            ("Steps", int, 100),
+            ("time", float, 10),
+            ("steps", int, 100),
         ])
+
+        self.dirty = True
+        self.states = None
+
+    def compute(self, hamiltonian, init_state, collapse_ops, args):
+        tlist = linspace(0, self.time, self.steps)
+        win.set_status("Computing States...")
+        self.states = mesolve(hamiltonian, init_state, tlist, collapse_ops, [], args).states
+        win.set_status("")
+        self.dirty = False
+
+
+class SetupItem(FormItem):
+    def __init__(self):
+        super(SetupItem, self).__init__("Setup", [])
         self.modes_item = GroupItem("Modes", "Mode", ModeItem)
-        self.cross_kerr_item = CrossModeGroupItem()
-        self.outputs_item = GroupItem("Outputs", "Output", OutputItem)
+        self.cross_mode_terms_item = CrossModeGroupItem(self.modes_item)
+        self.simulations_item = GroupItem("Analyses", "Simulation", SimulationItem)
+        self.outputs_item = OutputsGroupItem(self.modes_item, self.simulations_item)
         self.pulses_item = GroupItem("Pulses", "Pulse", PulseItem)
 
         self.appendRow(self.modes_item)
-        self.appendRow(self.cross_kerr_item)
-        self.appendRow(self.outputs_item)
+        self.appendRow(self.cross_mode_terms_item)
         self.appendRow(self.pulses_item)
+        self.appendRow(self.simulations_item)
+        self.appendRow(self.outputs_item)
 
         self.mode_count = 0
-        def increment_mode_count():
+
+        def increment_mode_count(item):
             self.mode_count += 1
+
         def decrement_mode_count():
             self.mode_count -= 1
-        self.modes_item.emitter.item_added.connect(increment_mode_count)
+
+        self.modes_item.emitter.item_created.connect(increment_mode_count)
+
+        def add_compute_action(item):
+            item.context_menu.add_action("Compute", lambda: self.compute(item))
+
+        self.simulations_item.emitter.item_added.connect(add_compute_action)
+
+        self.modes_item.add_item(dialog=False)
+        self.simulations_item.add_item(dialog=False)
+        self.outputs_item.add_item(dialog=False)
+
+    def compute(self, sim_item):
+        modes = self.modes_item.items_list()
+        H0 = 0
+        for i, mode in enumerate(modes):
+            ops_list = [qeye(m.dimension) for m in modes]
+            ops_list[i] = mode.hamiltonian()
+            H0 += tensor(*ops_list)
+
+        for term in self.cross_mode_terms_item.items_list():
+            H0 += term.hamiltonian(modes)
+
+        init_state = tensor(*[m.initial_state() for m in modes])
+
+        c_ops = []
+        for i, mode in enumerate(modes):
+            ops_list = [qeye(m.dimension) for m in modes]
+            ops_list[i] = sum(mode.collapse_ops())
+            c_ops.append(tensor(*ops_list))
+
+        args = {}
+
+        sim_item.compute(H0, init_state, c_ops, args)
+
+        for output in self.outputs_item.items_list():
+            if output.simulation is sim_item:
+                output.compute()
 
 
+class SetupsModel(QStandardItemModel):
+    def __init__(self):
+        super(SetupsModel, self).__init__()
 
-class SimulationsModel(QStandardItemModel):
-    mode_added = pyqtSignal(QStandardItem)
+        def update_handler(item):
+            parent = item.parent()
+            if parent is None:
+                return
+            if isinstance(item, FormItem):
+                item.params_model.item(0, 1).setText(item.text())
+            name = str(parent.child(item.row(), 0).text())
+            if isinstance(parent, FormItem) and name in parent.dtypes:
+                coerce_fn = parent.dtypes[name]
+                item.setData(str(coerce_fn(item.text())))
+
+        self.itemChanged.connect(update_handler)
+
+
+class SetupsView(ContextMenuStandardTreeView):
+    mode_added = pyqtSignal(ModeItem)
 
     def __init__(self):
-        super(SimulationsModel, self).__init__()
-        self.itemChanged.connect(self.update_handler)
-
-    def update_handler(self, item):
-        parent = item.parent()
-        if parent is None:
-            return
-        if isinstance(item, FormItem):
-            item.params_model.item(0, 1).setText(item.text())
-        name = str(parent.child(item.row(), 0).text())
-        if isinstance(parent, FormItem):
-            if name in parent.dtypes:
-                item.setData(str(parent.dtypes[name](item.text())))
-        if name == "Mode Count":
-            n = int(item.text())
-            modes = parent.modes_item
-            while modes.rowCount() < n:
-                m = ModeItem()
-                modes.appendRow(m)
-                self.mode_added.emit(m)
-            while modes.rowCount() > n:
-                modes.removeRow(modes.rowCount())
-
-
-class SimulationsView(ContextMenuStandardTreeView):
-    def __init__(self):
-        super(SimulationsView, self).__init__()
-        self.setModel(SimulationsModel())
-        self.model().mode_added.connect(self.expand_item)
-        self.context_menu = ActionsMenu([("Add Simulation", self.add_simulation)])
+        super(SetupsView, self).__init__()
+        self.setModel(SetupsModel())
+        self.context_menu = ActionsMenu([("Add Simulation", self.add_setup)])
 
     def expand_item(self, item):
         idx = self.model().indexFromItem(item)
@@ -152,22 +357,22 @@ class SimulationsView(ContextMenuStandardTreeView):
         for i in range(item.rowCount()):
             self.expand_item(item.child(i, 0))
 
-    def add_simulation(self):
-        item = SimulationItem()
+    def add_setup(self):
+        item = SetupItem()
         self.model().appendRow(item)
         self.expand_item(item)
         self.resizeColumnToContents(0)
-
-
+        item.modes_item.emitter.item_created.connect(self.mode_added.emit)
 
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super(MainWindow, self).__init__()
+        self.setStyleSheet("QMainWindow::separator {background: lightGray; width: 2px}")
 
-        self.tree_widget = SimulationsView()
+        self.tree_widget = SetupsView()
         self.eqn_widget = ResizableImage("latex/eqn.png", 100, .5, 2)
-        self.outputs_dock = DockArea()
+        self.outputs_dock_area = DockArea()
 
         self.tree_dock = QDockWidget("Project Manager")
         self.props_dock = QDockWidget("Properties")
@@ -176,134 +381,32 @@ class MainWindow(QMainWindow):
         self.tree_dock.setWidget(self.tree_widget)
         self.eqn_dock.setWidget(self.eqn_widget)
 
-        self.setCentralWidget(self.outputs_dock)
+        self.setCentralWidget(self.outputs_dock_area)
+        self.setCorner(Qt.BottomLeftCorner, Qt.LeftDockWidgetArea)
+        self.setCorner(Qt.TopLeftCorner, Qt.LeftDockWidgetArea)
         self.addDockWidget(Qt.LeftDockWidgetArea, self.tree_dock)
         self.addDockWidget(Qt.LeftDockWidgetArea, self.props_dock)
         self.addDockWidget(Qt.TopDockWidgetArea, self.eqn_dock)
 
-        self.tree_widget.add_simulation()
-        self.tree_widget.clicked.connect(self.set_props)
+        self.tree_widget.add_setup()
+        self.tree_widget.clicked.connect(self.set_props_widget)
 
-    def set_props(self, index):
-        item = self.tree_widget.model().itemFromIndex(index)
-        if hasattr(item, "params_widget"):
-            self.props_dock.setWidget(item.params_widget)
-
-
-    def set_eqn(self, suffix):
-        if suffix:
-            suffix = "_" + suffix
-        path = os.path.join("latex", "eqn%s.png"%suffix)
-        self.eqn_widget.set_file()
-        self.full_pixmap = QPixmap(path)
-        self.eqn_widget.setPixmap(self.full_pixmap.scaledToHeight(self.eqn_height, Qt.SmoothTransformation))
-
-    def resize_eqn(self, splitter_pos, idx):
-        aspect = float(self.full_pixmap.height())/self.full_pixmap.width()
-
-        self.eqn_height = max(50, int(.9*splitter_pos))
-        self.eqn_height = min(aspect*self.width(), self.eqn_height)
-        self.eqn_widget.setPixmap(self.full_pixmap.scaledToHeight(self.eqn_height, Qt.SmoothTransformation))
-
-
-if __name__ == '__main__':
-    app = QApplication([])
-    win = MainWindow()
-    win.show()
-    sys.exit(app.exec_())
-
-
-class Window(QMainWindow):
-    def __init__(self):
-        super(Window, self).__init__()
-        central_widget = QSplitter(Qt.Vertical)
-        self.setCentralWidget(central_widget)
-        # main_layout = QVBoxLayout(central_widget)
-        self.eqn_widget = QLabel()
-        self.eqn_widget.setAlignment(Qt.AlignHCenter)
-        self.eqn_height = 165
-        self.set_eqn("")
-        central_widget.splitterMoved.connect(self.resize_eqn)
-        central_widget.addWidget(self.eqn_widget)
-        self.split = split = QSplitter()
-        central_widget.addWidget(split)
-        side_bar = QWidget()
-        split.addWidget(side_bar)
-        layout = QVBoxLayout(side_bar)
-        self.mode_count_spin = QSpinBox()
-        self.mode_count_spin.setValue(1)
-        self.mode_count_spin.valueChanged.connect(self.update_count)
-        self.mode_box = QTabWidget()
-        self.cross_kerr_table = UpperHalfArrayModel()
-        self.cross_kerr_box = QTableView()
-        self.cross_kerr_box.setModel(self.cross_kerr_table)
-        self.change_eqn_on_click(self.cross_kerr_box, "kerr")
-        self.modes = []
-
-        mode_count_layout = QHBoxLayout()
-        mode_count_layout.addWidget(QLabel("Mode Count"))
-        mode_count_layout.addWidget(self.mode_count_spin)
-        layout.addLayout(mode_count_layout)
-        layout.addWidget(self.mode_box)
-        layout.addWidget(QLabel("Second-Order Cross-Mode Terms"))
-        layout.addWidget(self.cross_kerr_box)
-
-        # self.drive_params = Form([
-        #
-        # ])
-
-        self.simulation_params = Form([
-            ("time", "float", 10),
-            ("steps", "int", 100),
-        ])
-
-        calc_button = QPushButton("Calculate")
-        layout.addWidget(calc_button)
-        calc_button.clicked.connect(self.run_simulation)
 
         self.status_label = QLabel("")
         self.progress_bar = QProgressBar()
         self.statusBar().addWidget(self.status_label)
         self.statusBar().addWidget(self.progress_bar, 1)
 
-        self.plot_tab_box = QTabWidget()
-        self.plots = []
-        split.addWidget(self.plot_tab_box)
-
-        self.update_count()
-
-    def resize_eqn(self, splitter_pos, idx):
-        aspect = float(self.full_pixmap.height())/self.full_pixmap.width()
-
-        self.eqn_height = max(50, int(.9*splitter_pos))
-        self.eqn_height = min(aspect*self.width(), self.eqn_height)
-        self.eqn_widget.setPixmap(self.full_pixmap.scaledToHeight(self.eqn_height, Qt.SmoothTransformation))
+    def set_props_widget(self, index):
+        item = self.tree_widget.model().itemFromIndex(index)
+        if hasattr(item, "params_widget"):
+            self.props_dock.setWidget(item.params_widget)
 
     def set_eqn(self, suffix):
         if suffix:
             suffix = "_" + suffix
         path = os.path.join("latex", "eqn%s.png"%suffix)
-        self.full_pixmap = QPixmap(path)
-        self.eqn_widget.setPixmap(self.full_pixmap.scaledToHeight(self.eqn_height, Qt.SmoothTransformation))
-
-    def change_eqn_on_click(self, widget, eqn_suffix):
-        class SpinboxClickHandler(QObject):
-            focus_in = pyqtSignal()
-            focus_out = pyqtSignal()
-
-            def eventFilter(self, obj, ev):
-                if ev.type() == QFocusEvent.FocusIn:
-                    self.focus_in.emit()
-                if ev.type() == QFocusEvent.FocusOut:
-                    self.focus_out.emit()
-                return False
-
-        widget.click_handler = handler = SpinboxClickHandler()
-        widget.installEventFilter(handler)
-        widget.focus_in = handler.focus_in
-        widget.focus_out = handler.focus_out
-        widget.focus_in.connect(lambda: self.set_eqn(eqn_suffix))
-        widget.focus_out.connect(lambda: self.set_eqn(""))
+        self.eqn_widget.set_file(path)
 
     def add_image_view(self, data):
         if not self.plots:
@@ -317,399 +420,22 @@ class Window(QMainWindow):
         image_view.setImage(data)
         split = self.centralWidget()
         split.addWidget(image_view)
-        QApplication.instance().processEvents()
+        app.processEvents()
         self.resize(1250, self.height())
         split.setSizes([250, 1000])
 
-
-    def update_count(self):
-        n = self.mode_count_spin.value()
-        self.cross_kerr_table.set_n(n)
-        self.cross_kerr_box.resizeColumnsToContents()
-        while len(self.modes) < n:
-            m = Form([
-                ("name", "str", "Mode"),
-                ("dimension", "int", 2),
-                ("frequency", "float", 1),
-                ("decay", "float"),
-                ("dephasing", "float"),
-                ("drive amplitude", "float"),
-                ("drive angle", "float"),
-                ("initial state", "int"),
-                ("initial displacement", "float"),
-                ("initial leg count", "int", 1),
-                ("initial leg phases", "array", [[1]]),
-            ])
-            mw = m.widget
-            eq_assns = [
-                ("frequency", "freq"),
-                ("decay", "decay"),
-                ("dephasing", "dephasing"),
-                ("drive amplitude", "drive_amp"),
-                ("drive angle", "drive_phase"),
-                ("initial state", "init_state"),
-                ("initial displacement", "displacement"),
-                ("initial leg count", "leg_count"),
-                ("initial leg phases", "leg_phase"),
-            ]
-            for m_name, eq_name in eq_assns:
-                self.change_eqn_on_click(m.child_widgets[m_name], eq_name)
-
-            def update_leg_phases():
-                n = m.initial_leg_count
-                l = list(m.initial_leg_phases)
-                len_diff = n - len(l)
-                if len_diff >= 0:
-                    m.initial_leg_phases[0].extend([1]*len_diff)
-                else:
-                    del m.initial_leg_phases[len_diff:]
-                w = m.child_widgets["initial leg phases"]
-                w.model().modelReset.emit()
-                w.model().dtype = complex
-                w.resizeColumnsToContents()
-
-            m.child_widgets["initial leg count"].valueChanged.connect(update_leg_phases)
-
-            # Add Output Box
-            iv = ImageView()
-            iv.ui.histogram.gradient.restoreState({
-                "ticks": [
-                    (0.0, (255, 0, 0)),
-                    (0.5, (255, 255, 255)),
-                    (1.0, (0, 0, 255))],
-                "mode": "rgb"
-            })
-            self.modes.append((m, mw))
-            self.plots.append(iv)
-            self.mode_box.addTab(mw, m.name)
-            self.plot_tab_box.addTab(iv, m.name)
-            m.child_widgets["name"].textChanged.connect(lambda t: self.update_tabs())
-        while len(self.modes) > n:
-            m, mw = self.modes.pop(-1)
-            iv = self.plots.pop(-1)
-            im = self.mode_box.indexOf(mw)
-            self.mode_box.removeTab(im)
-            self.plot_tab_box.removeTab(im)
-
-    def update_tabs(self):
-        for i, (m, mw) in enumerate(self.modes):
-            self.mode_box.setTabText(i, m.name)
-            self.plot_tab_box.setTabText(i, m.name)
-
     def set_status(self, msg):
         self.status_label.setText(msg)
-        QApplication.instance().processEvents()
+        app.processEvents()
 
     def set_progress(self, percent):
         self.progress_bar.setValue(percent)
-        QApplication.instance().processEvents()
-
-    def run_simulation(self):
-        modes = [m for m, mw in self.modes]
-        id_list = [qeye(m.dimension) for m in modes]
-        H0 = 0
-        H1 = []
-        args = {}
-        psi0_list = []
-        c_ops = []
-        n_ops = []
-        for i, m in enumerate(modes):
-            n_list = copy(id_list)
-            a_list = copy(id_list)
-            n_list[i] = num(m.dimension)
-            a_list[i] = destroy(m.dimension)
-            n_op = tensor(*n_list)
-            n_ops.append(n_op)
-            a_op = tensor(*a_list)
-            H0 += m.frequency*n_op
-            if m.drive_amplitude:
-                H1 += [m.drive_amplitude*(a_op + a_op.dag()), "cos(df%d*t + phi%d)"%(i, i)]
-                args.update({'df%d'%i: m.drive_frequency, 'phi%d'%i: pi*m.drive_phase_degrees/180})
-
-            # Initial State
-            alpha = m.initial_displacement
-            psi0_i = 0
-            leg_angle = exp(2j*pi/m.initial_leg_count)
-            vacuum = basis(m.dimension, 0)
-            leg_phases = list(m.initial_leg_phases)
-            leg_phases += [1]*(m.initial_leg_count - len(leg_phases))
-            for n, phase in enumerate(leg_phases):
-                psi0_i += phase*displace(m.dimension, leg_angle**n*alpha)*vacuum
-
-            psi0_list.append(psi0_i)
-            c_ops += [m.decay*a_op, m.dephasing*n_op]
-
-        for i, row in enumerate(self.cross_kerr_table.array):
-            for j, val in enumerate(row):
-                H0 += val*n_ops[i]*n_ops[j]
-
-        if H1:
-            H = [H0, H1]
-        else:
-            H = H0
-
-        psi0 = tensor(*psi0_list)
-        sim = self.simulation_params
-        times = linspace(0, sim.time, sim.steps)
-        self.set_status("Computing States")
-        result = mesolve(H, psi0, times, c_ops, [], args)
-
-        self.set_status("Computing Wigners")
-        for n, m in enumerate(modes):
-            axis = linspace(-m.wigner_range, m.wigner_range, m.wigner_resolution)
-            wigners = []
-            for i, s in enumerate(result.states):
-                wigners.append(wigner(s.ptrace(n), axis, axis))
-                self.set_progress(int(100*i/sim.steps))
-            wigners = np.array(wigners)
-
-            image_view = self.plots[n]
-            image_view.setImage(wigners)
-            max_value = abs(wigners).max()
-            image_view.setLevels(-max_value, max_value)
-        self.set_progress(0)
-        self.set_status("")
+        app.processEvents()
 
 
-# class ModeParameters(HasTraits):
-# name = Str("Mode")
-#     dimension = Int(2)
-#     frequency = Float(1)
-#     decay = Float
-#     dephasing = Float
-#     drive_amplitude = Float
-#     drive_frequency = Float
-#     drive_phase_degrees = Float
-#     initial_displacement = Float
-#     initial_leg_count = Int(1)
-#     initial_leg_phases = ListComplex([1])
-#     wigner_range = Float(5)
-#     wigner_resolution = Float(100)
-#
-#
-#     def __init__(self):
-#         super(ModeParameters, self).__init__()
-#         self.on_trait_change(self.update_leg_phases, 'initial_leg_count')
-#
-#     def update_leg_phases(self):
-#         n = self.initial_leg_count
-#         l = list(self.initial_leg_phases)
-#         len_diff = n - len(l)
-#         if len_diff >= 0:
-#             self.initial_leg_phases.extend([1]*len_diff)
-#         else:
-#             del self.initial_leg_phases[len_diff:]
-#
-#
-# ModeView = View(Group(
-#     Item(name="name"),
-#     Item(name="dimension"),
-#     Item(name="frequency"),
-#     Item(name="decay"),
-#     Item(name="dephasing"),
-#     Item(name="drive_amplitude"),
-#     Item(name="drive_frequency"),
-#     Item(name="drive_phase_degrees"),
-#     Item(name="initial_displacement"),
-#     Item(name="initial_leg_count"),
-#     Item(name="initial_leg_phases")
-# ))
-
-# class OutputParameters(HasTraits):
-#     time = Float(10)
-#     steps = Int(100)
-#
-#
-# OutputView = View(Group(
-#     Item(name='time'),
-#     Item(name='steps'),
-# ))
-
-# class SimulationItem(QStandardItem):
-#     def __init__(self):
-#         super(SimulationModel, self).__init__()
-#         root_names = ["Simulation", "Modes", "Cross-Mode Terms", "Outputs"]
-#         self.root_categories = {r:QStandardItem(r) for r in root_names}
-#         for name in root_names:
-#             item = self.root_categories[name]
-#             item.setEditable(False)
-#             self.appendRow(item)
-#         self.insertColumns(1, 1)
-#         sim_names = ["Time", "Steps", "Mode Count"]
-#         sim_defaults = [10, 100, 1]
-#         self.sim_types = [int, float, int]
-#         self.sim_categories = {n:QStandardItem(n) for n in sim_names}
-#         self.sim_values = {n:QStandardItem(str(val)) for n, val in zip(sim_names, sim_defaults)}
-#         sim_val_column = [self.sim_values[n] for n in sim_names]
-#         sim = self.root_categories["Simulation"]
-#         for name in sim_names:
-#             item = self.sim_categories[name]
-#             item.setEditable(False)
-#             sim.appendRow(item)
-#         sim.appendColumn(sim_val_column)
-#
-#         self.modes = [ModeModel]
-#
-# class ModeModel(QStandardItem):
-#     def __init__(self):
-#         root_names = [""]
-
-#
-# class SimulationModel(QAbstractItemModel):
-#     def __init__(self):
-#         self.insertRows(0, 3, self)
-#         self.root_categories = ["Simulation", "Modes", "Cross-Mode Terms", "Outputs"]
-#
-#         self.simulation_categories = ["Time", "Steps", "Mode Count"]
-#         self.modes = [ModeModel()]
-#         self.cross_mode_terms = []
-#         self.outputs = []
-#         self.root = {
-#             "Simulation": self.simulation_categories,
-#             "Modes": self.modes,
-#             "Cross-Mode Terms": self.cross_mode_terms,
-#             "Outputs": self.outputs,
-#             }
-#
-#         self.time = 10
-#         self.steps = 100
-#         self.mode_count = 1
-#         self.simulation = {
-#             "Time": self.time,
-#             "Steps": self.steps,
-#             "Mode Count": self.mode_count,
-#             }
-#
-#
-#
-#     def hasChildren(self, parent):
-#         pass
-#
-#     def rowCount(self, parent):
-#         if not parent.isValid():
-#             return len(self.root_categories)
-#         elif not parent.parent().isValid():
-#             return len(self.root[self.root_categories[parent.row()]])
-#         else:
-#             parent.parent().row()
-#
-#
-#     def columnCount(self, parent, *args, **kwargs):
-#         return 1
-#
-#     def data(self, idx, role):
-#         if role == Qt.DisplayRole:
-#             if idx.parent() is self:
-#                 return [idx.row()]
-#
-#
-# class ModeModel():
-#     pass
-#
-#
-#
-# class Window2(QMainWindow):
-#     def __init__(self):
-#         v_split = QSplitter(Qt.Vertical)
-#         self.setCentralWidget(v_split)
-#
-#         self.eqn_box = QLabel()
-#         h_split = QSplitter()
-#         v_split.addWidget(self.eqn_box)
-#         v_split.addWidget(h_split)
-#
-#         main_params = MainParams()
-#         mode_params_box = QTabWidget()
-#
-# class MainParams(QGroupBox):
-#     pass
-#
-#
-
-# class Form(object):
-#     def __init__(self, items):
-#         self.widget = QWidget()
-#         self.child_widgets = {}
-#         self.layout = QFormLayout(self.widget)
-#         self.layout.setLabelAlignment(Qt.AlignRight)
-#         self.getters = {}
-#         for i in items:
-#             try:
-#                 name, type = i
-#                 default = None
-#             except ValueError:
-#                 name, type, default = i
-#             w = getattr(self, "make_"+type)(name, default)
-#             self.add_widget(name, w)
-#
-#     def make_int(self, name, default):
-#         w = QSpinBox()
-#         if default is not None:
-#             w.setValue(default)
-#         self.getters[methodize(name)] = w.value
-#         return w
-#
-#     def make_float(self, name, default):
-#         w = QDoubleSpinBox()
-#         if default is not None:
-#             w.setValue(default)
-#         self.getters[methodize(name)] = w.value
-#         return w
-#
-#     def make_str(self, name, default):
-#         w = QLineEdit()
-#         if default is not None:
-#             w.setText(default)
-#         self.getters[methodize(name)] = w.text
-#         return w
-#
-#     def make_array(self, name, default):
-#         w = QTableView()
-#         m = ArrayModel(default)
-#         w.setModel(m)
-#         self.getters[methodize(name)] = lambda: m.array
-#         return w
-#
-#     def add_widget(self, name, w):
-#         self.layout.addRow(wordify(name)+":", w)
-#         self.child_widgets[name] = w
-#
-#     def __getattr__(self, item):
-#         if item in self.getters:
-#             return self.getters[item]()
-#         else:
-#             raise AttributeError(item)
-# class ModeGroupItem(ConstantItem):
-#     def __init__(self):
-#         super(ModeGroupItem, self).__init__("Modes")
-#         self.context_menu = ActionsMenu([("New Mode", self.add_mode)])
-#
-#     def add_mode(self):
-#         m = ModeItem()
-#         d = OKCancelDialog(m.params_widget)
-#         if d.exec_():
-#             m.params_widget.setParent(None)
-#             self.appendRow(m)
-#             self.parent().mode_count += 1
-#     def __init__(self):
-#         super(OutputsGroupItem, self).__init__("Outputs")
-#         self.context_menu = ActionsMenu([('Add Output', self.add_output)])
-#
-#     def add_output(self):
-#         i = OutputItem()
-#         d = OKCancelDialog(i.params_widget)
-#         if d.exec_():
-#             i.params_widget.setParent(None)
-#             self.appendRow(i)
-
-
-
-
-
-# if __name__ == '__main__':
-#     app = QApplication.instance()
-#     win = Window()
-#     win.show()
-#     win.resize(1250, win.height())
-#     win.split.setSizes([250, 1000])
-#     app.exec_()
+if __name__ == '__main__':
+    app = QApplication([])
+    win = MainWindow()
+    win.show()
+    win.resize(1000, 800)
+    sys.exit(app.exec_())

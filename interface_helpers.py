@@ -33,7 +33,7 @@ class ArrayModel(QAbstractTableModel):
         except ValueError:
             return 0
 
-    def data(self, idx, role):
+    def data(self, idx, role=None):
         if role == Qt.DisplayRole:
             i, j = idx.row(), idx.column()
             try:
@@ -41,7 +41,7 @@ class ArrayModel(QAbstractTableModel):
             except IndexError:
                 return "-"
 
-    def setData(self, idx, val, role):
+    def setData(self, idx, val, role=None):
         if role == Qt.EditRole:
             i, j = idx.row(), idx.column()
             self.array[i][j] = self.dtype(str(val.toString()))
@@ -64,7 +64,6 @@ class UpperHalfArrayModel(ArrayModel):
         self.n = 0
 
     def set_n(self, n):
-        dn = n - self.n
         while n > self.n:
             self.n += 1
             self.array.append([0]*self.n)
@@ -76,8 +75,8 @@ class UpperHalfArrayModel(ArrayModel):
 
 
 class ConstantItem(QStandardItem):
-    def __init__(self, *args, **kwargs):
-        super(ConstantItem, self).__init__(*args, **kwargs)
+    def __init__(self, *args):
+        super(ConstantItem, self).__init__(*args)
         self.setEditable(False)
 
 
@@ -96,32 +95,44 @@ class MySpinBox(QSpinBox):
         self.setMaximum(10000000)
 
 
+class ItemsComboBox(MyComboBox):
+    def __init__(self, group_item, *args, **kwargs):
+        items = group_item.items_list()
+        names = [str(i.text()) for i in items]
+        super(ItemsComboBox, self).__init__(names, *args, **kwargs)
+
+
 class FormItem(QStandardItem):
     def __init__(self, name, fields):
         super(FormItem, self).__init__(name)
         fields = [("Name", str, name)] + fields
+        self.name = lambda: str(self.text())
         self.names, _, _ = zip(*fields)
-        self.dtypes = {n: d for n, d, _ in fields}
-        self.widgets = {}
+        self.dtypes = {methodize(n): d for n, d, _ in fields}
+        widgets = {}
         for n, d, _ in fields:
+            n = wordify(n)
             if d is int:
-                self.widgets[n] = MySpinBox, "value", "setValue"
+                widgets[n] = MySpinBox, "value", "setValue"
             elif d is float:
-                self.widgets[n] = QDoubleSpinBox, "value", "setValue"
+                widgets[n] = QDoubleSpinBox, "value", "setValue"
             elif isinstance(d, bool):
-                self.widgets[n] = QCheckBox, "isChecked", "setChecked"
+                widgets[n] = QCheckBox, "isChecked", "setChecked"
             elif isinstance(d, (list, tuple)):
-                self.dtypes[n] = str
-                self.widgets[n] = lambda d=d, **kwargs: MyComboBox(d, **kwargs), "currentText", "set_current_text"
-        self.method_names = {methodize(n): n for n in self.names}
-        self.val_items = {n: QStandardItem(str(v)) for n, _, v in fields}
+                self.dtypes[methodize(n)] = str
+                widgets[n] = lambda grp=d, **kwargs: MyComboBox(grp, **kwargs), "currentText", "set_current_text"
+            elif isinstance(d, GroupItem):
+                self.dtypes[methodize(n)] = lambda i_name, grp=d: grp.item_from_name(i_name)
+                widgets[n] = lambda grp=d, **kwargs: ItemsComboBox(grp, **kwargs), "currentText", "set_current_text"
+        self.method_names = [methodize(n) for n in self.names]
+        self.val_items = {methodize(n): QStandardItem(str(v)) for n, _, v in fields}
         self.params_model = QStandardItemModel()
         self.params_model.itemChanged.connect(self.update_name)
         for name in self.names:
             # self.appendRow([ConstantItem(name), self.val_items[name]])
-            self.params_model.appendRow([ConstantItem(wordify(name)), self.val_items[name]])
+            self.params_model.appendRow([ConstantItem(wordify(name)), self.val_items[methodize(name)]])
         self.params_widget = QTableView()
-        self.params_widget.setItemDelegate(FormDelegate(self.params_model, self.widgets))
+        self.params_widget.setItemDelegate(FormDelegate(self.params_model, widgets))
         self.params_widget.setModel(self.params_model)
         self.params_widget.resizeRowsToContents()
         self.params_widget.horizontalHeader().hide()
@@ -137,14 +148,15 @@ class FormItem(QStandardItem):
 
     def __getattr__(self, item):
         if item in self.method_names:
-            name = self.method_names[item]
-            dtype = self.dtypes[name]
-            return dtype(self.val_items[name].text())
+            dtype = self.dtypes[item]
+            return dtype(self.val_items[item].text())
         else:
-            raise AttributeError
+            raise AttributeError(item)
 
 
 class FormDelegate(QStyledItemDelegate):
+    item_editor_activated = pyqtSignal(str)
+
     def __init__(self, model, widgets_dict):
         super(FormDelegate, self).__init__()
         self.model = model
@@ -152,10 +164,14 @@ class FormDelegate(QStyledItemDelegate):
 
     def createEditor(self, parent, style, idx):
         if idx.column() == 1:
-            item = self.model.itemFromIndex(idx)
             name = str(self.model.itemFromIndex(idx.sibling(idx.row(), 0)).text())
+            self.item_editor_activated.emit(name)
+            print name
             if name in self.widgets_dict:
-                return self.widgets_dict[name][0](parent=parent)
+                print 'in'
+                w = self.widgets_dict[name][0]()
+                w.setParent(parent)
+                return w
 
         return super(FormDelegate, self).createEditor(parent, style, idx)
 
@@ -165,11 +181,14 @@ class ActionsMenu(QMenu):
         super(ActionsMenu, self).__init__()
         self.add_actions(rows)
 
+    def add_action(self, name, func):
+        a = QAction(name, self)
+        self.addAction(a)
+        a.triggered.connect(lambda x: func())
+
     def add_actions(self, rows):
         for name, func in rows:
-            a = QAction(name, self)
-            self.addAction(a)
-            a.triggered.connect(lambda x: func())
+            self.add_action(name, func)
 
 
 class OKCancelDialog(QDialog):
@@ -201,8 +220,11 @@ def increment_name(name):
         new_n = str(int(n) + 1)
         return name.replace(n, new_n)
 
+
 class GroupItemEmitter(QObject):
-    item_added = pyqtSignal()
+    item_added = pyqtSignal(QStandardItem)
+    item_created = pyqtSignal(QStandardItem)
+
 
 class GroupItem(ConstantItem):
     def __init__(self, group_name, item_name, item_class):
@@ -211,29 +233,41 @@ class GroupItem(ConstantItem):
         self.item_class = item_class
         self.emitter = GroupItemEmitter()
 
-    def add_item(self):
-        i = self.item_class()
+    def add_item(self, dialog=True):
+        try:
+            i = self.item_class()
+        except TypeError:
+            i = self.item_class(self)
         child_texts = [self.child(n).text() for n in range(self.rowCount())]
+        self.emitter.item_created.emit(i)
         while i.text() in child_texts:
             i.set_name(increment_name(str(i.text())))
-        if hasattr(i, 'params_widget'):
+        if dialog and hasattr(i, 'params_widget'):
             d = OKCancelDialog(i.params_widget)
             if d.exec_():
                 i.params_widget.setParent(None)
                 self.appendRow(i)
-                self.emitter.item_added.emit()
+                self.emitter.item_added.emit(i)
         else:
             self.appendRow(i)
-            self.emitter.item_added.emit()
+            self.emitter.item_added.emit(i)
+
+    def items_list(self):
+        return [self.child(i) for i in range(self.rowCount())]
+
+    def item_from_name(self, name):
+        for i in self.items_list():
+            if str(i.text()) == name:
+                return i
 
 
 class ContextMenuStandardTreeView(QTreeView):
     def __init__(self):
         super(ContextMenuStandardTreeView, self).__init__()
         self.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.customContextMenuRequested.connect(self.showContextMenu)
+        self.customContextMenuRequested.connect(self.show_context_menu)
 
-    def showContextMenu(self, point):
+    def show_context_menu(self, point):
         item = self.model().itemFromIndex(self.indexAt(point))
         if hasattr(item, "context_menu"):
             item.context_menu.exec_(self.mapToGlobal(point))
@@ -243,10 +277,14 @@ class ContextMenuStandardTreeView(QTreeView):
             return True
         return False
 
+
 class ResizableImage(QLabel):
     def __init__(self, filename, height, min_scale, max_scale):
         super(ResizableImage, self).__init__()
+        self.setAlignment(Qt.AlignCenter)
+        self.full_pixmap = None
         self.scaled_pixmap = None
+        self.aspect = None
         self.set_file(filename)
         self.set_height(height)
         self.min_height = self.full_pixmap.height() * min_scale * self.aspect
@@ -275,6 +313,3 @@ class ResizableImage(QLabel):
             self.set_width(min(max(.9 * width, self.min_width), self.max_width))
         else:
             self.set_height(min(max(.9 * height, self.min_height), self.max_height))
-
-
-
