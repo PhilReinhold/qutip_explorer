@@ -7,11 +7,11 @@ def print_fn(*s):
     print ",".join(map(str, s))
 
 
-def methodize(s):
+def method_style(s):
     return s.lower().replace(" ", "_")
 
 
-def wordify(s):
+def word_style(s):
     return " ".join("".join([w[0].upper(), w[1:]]) for w in s.replace("_", " ").split())
 
 
@@ -108,10 +108,10 @@ class FormItem(QStandardItem):
         fields = [("Name", str, name)] + fields
         self.name = lambda: str(self.text())
         self.names, _, _ = zip(*fields)
-        self.dtypes = {methodize(n): d for n, d, _ in fields}
+        self.dtypes = {method_style(n): d for n, d, _ in fields}
         widgets = {}
         for n, d, _ in fields:
-            n = wordify(n)
+            n = word_style(n)
             if d is int:
                 widgets[n] = MySpinBox, "value", "setValue"
             elif d is float:
@@ -119,18 +119,17 @@ class FormItem(QStandardItem):
             elif isinstance(d, bool):
                 widgets[n] = QCheckBox, "isChecked", "setChecked"
             elif isinstance(d, (list, tuple)):
-                self.dtypes[methodize(n)] = str
+                self.dtypes[method_style(n)] = str
                 widgets[n] = lambda grp=d, **kwargs: MyComboBox(grp, **kwargs), "currentText", "set_current_text"
             elif isinstance(d, GroupItem):
-                self.dtypes[methodize(n)] = lambda i_name, grp=d: grp.item_from_name(i_name)
+                self.dtypes[method_style(n)] = lambda i_name, grp=d: grp.item_from_name(i_name)
                 widgets[n] = lambda grp=d, **kwargs: ItemsComboBox(grp, **kwargs), "currentText", "set_current_text"
-        self.method_names = [methodize(n) for n in self.names]
-        self.val_items = {methodize(n): QStandardItem(str(v)) for n, _, v in fields}
+        self.method_names = [method_style(n) for n in self.names]
+        self.val_items = {method_style(n): QStandardItem(str(v)) for n, _, v in fields}
         self.params_model = QStandardItemModel()
         self.params_model.itemChanged.connect(self.update_name)
         for name in self.names:
-            # self.appendRow([ConstantItem(name), self.val_items[name]])
-            self.params_model.appendRow([ConstantItem(wordify(name)), self.val_items[methodize(name)]])
+            self.params_model.appendRow([ConstantItem(word_style(name)), self.val_items[method_style(name)]])
         self.params_widget = QTableView()
         self.params_widget.setItemDelegate(FormDelegate(self.params_model, widgets))
         self.params_widget.setModel(self.params_model)

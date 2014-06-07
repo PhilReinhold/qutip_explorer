@@ -1,9 +1,14 @@
+from PyQt4.QtCore import QSettings
 from PyQt4.QtGui import QApplication, QMainWindow, QProgressBar, QGroupBox, QRadioButton, QDockWidget
 from numpy import linspace
 from pyqtgraph import ImageView, PlotWidget
 from pyqtgraph.dockarea import DockArea, Dock
 from qutip import *
 from interface_helpers import *
+
+__author__ = "Phil Reinhold"
+__version__ = 0.1
+__ui_version__ = 1
 
 
 class ModeItemEmitter(QObject):
@@ -43,11 +48,11 @@ class ModeItem(FormItem):
 
         def mode_hover_changed(idx):
             name = self.params_model.item(idx.row(), 0).text()
-            win.set_eqn(eqn_associations.get(str(name), ""))
+            win.set_eqn_pixmap(eqn_associations.get(str(name), ""))
 
         self.params_widget.setMouseTracking(True)
         self.params_widget.entered.connect(mode_hover_changed)
-        self.params_widget.leaveEvent = lambda e: win.set_eqn("")
+        self.params_widget.leaveEvent = lambda e: win.set_eqn_pixmap("")
 
     def tensor_index(self):
         return self.group.items_list().index(self)
@@ -374,12 +379,21 @@ class MainWindow(QMainWindow):
         self.eqn_widget = ResizableImage("latex/eqn.png", 100, .5, 2)
         self.outputs_dock_area = DockArea()
 
-        self.tree_dock = QDockWidget("Project Manager")
-        self.props_dock = QDockWidget("Properties")
-        self.eqn_dock = QDockWidget("Equation")
+        docks = []
+        view_menu = self.menuBar().addMenu("View")
+        for dock_name in ["Project Manager", "Properties", "Equation"]:
+            dock = QDockWidget(dock_name)
+            dock.setObjectName(method_style(dock_name))
+            view_menu.addAction(dock.toggleViewAction())
+            docks.append(dock)
+        self.tree_dock, self.props_dock, self.eqn_dock = docks
 
         self.tree_dock.setWidget(self.tree_widget)
         self.eqn_dock.setWidget(self.eqn_widget)
+        placeholder = QLabel("No Item Selected")
+        placeholder.setAlignment(Qt.AlignCenter)
+        placeholder.setMinimumSize(200, 100)
+        self.props_dock.setWidget(placeholder)
 
         self.setCentralWidget(self.outputs_dock_area)
         self.setCorner(Qt.BottomLeftCorner, Qt.LeftDockWidgetArea)
@@ -391,38 +405,24 @@ class MainWindow(QMainWindow):
         self.tree_widget.add_setup()
         self.tree_widget.clicked.connect(self.set_props_widget)
 
-
         self.status_label = QLabel("")
         self.progress_bar = QProgressBar()
         self.statusBar().addWidget(self.status_label)
         self.statusBar().addWidget(self.progress_bar, 1)
+
+        self.restoreGeometry(settings.value("geometry").toByteArray())
+        self.restoreState(settings.value("state").toByteArray(), __ui_version__)
 
     def set_props_widget(self, index):
         item = self.tree_widget.model().itemFromIndex(index)
         if hasattr(item, "params_widget"):
             self.props_dock.setWidget(item.params_widget)
 
-    def set_eqn(self, suffix):
+    def set_eqn_pixmap(self, suffix):
         if suffix:
             suffix = "_" + suffix
         path = os.path.join("latex", "eqn%s.png"%suffix)
         self.eqn_widget.set_file(path)
-
-    def add_image_view(self, data):
-        if not self.plots:
-            self.plot_tab_box.show()
-        image_view = ImageView()
-        self.plots.append(image_view)
-        self.plot_tab_box.addTab()
-        image_view.ui.histogram.gradient.restoreState(
-            {"ticks": [(0.0, (255, 0, 0)), (0.5, (255, 255, 255)), (1.0, (0, 0, 255))], "mode": "rgb"}
-        )
-        image_view.setImage(data)
-        split = self.centralWidget()
-        split.addWidget(image_view)
-        app.processEvents()
-        self.resize(1250, self.height())
-        split.setSizes([250, 1000])
 
     def set_status(self, msg):
         self.status_label.setText(msg)
@@ -432,9 +432,15 @@ class MainWindow(QMainWindow):
         self.progress_bar.setValue(percent)
         app.processEvents()
 
+    def closeEvent(self, ev):
+        settings.setValue("geometry", self.saveGeometry())
+        settings.setValue("state", self.saveState(__ui_version__))
+        return super(MainWindow, self).closeEvent(ev)
+
 
 if __name__ == '__main__':
     app = QApplication([])
+    settings = QSettings("philreinhold", "qutip_explorer")
     win = MainWindow()
     win.show()
     win.resize(1000, 800)
