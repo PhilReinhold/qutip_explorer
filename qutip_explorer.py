@@ -11,7 +11,6 @@ __author__ = "Phil Reinhold"
 __version__ = 0.1
 __ui_version__ = 1
 
-
 class ModeItemEmitter(QObject):
     mode_form_focus_in = pyqtSignal(str)
     mode_form_focus_out = pyqtSignal(str)
@@ -226,6 +225,7 @@ class OutputItem(FormItem):
             self.plot = ImageView()
         self.plot.setImage(self.data)
 
+    # TODO: Bloch/XYZ plot output implementation
     def plot_xyz(self):
         pass
 
@@ -281,6 +281,8 @@ class SequenceItem(FormItem):
         self.add_field("Wait (time)", float, 0)
 
 
+# TODO: Better name than Simulation
+# TODO: Simple Simulations & Sequence Simulations
 class SimulationItem(FormItem):
     def __init__(self):
         super(SimulationItem, self).__init__("Simulation_1", [
@@ -298,7 +300,7 @@ class SimulationItem(FormItem):
         win.set_status("")
         self.dirty = False
 
-
+# TODO: Parametric Sweep Group
 class SetupItem(FormItem):
     def __init__(self):
         super(SetupItem, self).__init__("Setup", [])

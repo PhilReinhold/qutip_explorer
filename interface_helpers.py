@@ -105,6 +105,8 @@ class ItemsComboBox(MyComboBox):
         return self.items_list[self.currentIndex()]
 
 
+# TODO: Variables system for FormItems
+# TODO: Copy/Paste system for FormItems/GroupItems
 class FormItem(QStandardItem):
     def __init__(self, name, fields):
         super(FormItem, self).__init__(name)
