@@ -1,5 +1,6 @@
 from PyQt4.QtCore import QSettings
-from PyQt4.QtGui import QApplication, QMainWindow, QProgressBar, QGroupBox, QRadioButton, QDockWidget
+from PyQt4.QtGui import QApplication, QMainWindow, QProgressBar, QGroupBox, QRadioButton, QDockWidget, QWidget, \
+    QHBoxLayout, QPushButton
 from numpy import linspace
 from pyqtgraph import ImageView, PlotWidget
 from pyqtgraph.dockarea import DockArea, Dock
@@ -18,7 +19,7 @@ class ModeItemEmitter(QObject):
 
 class ModeItem(FormItem):
     def __init__(self, group):
-        super(ModeItem, self).__init__("Mode", [
+        super(ModeItem, self).__init__("Mode_1", [
             ("dimension", int, 2),
             ("frequency", float, 1),
             ("anharmonicity", float, 0),
@@ -170,7 +171,7 @@ class MyImageView(ImageView):
 
 class OutputItem(FormItem):
     def __init__(self, group):
-        super(OutputItem, self).__init__("Output", [
+        super(OutputItem, self).__init__("Output_1", [
             ("simulation", group.sims_item, group.sims_item.items_list()[0].name()),
             ("mode", group.modes_item, group.modes_item.items_list()[0].name()),
             ("report type", ["Wigner", "Expect-XYZ"], "Wigner"),
@@ -231,7 +232,7 @@ class OutputItem(FormItem):
 
 class PulseItem(FormItem):
     def __init__(self):
-        super(PulseItem, self).__init__("Pulse", [
+        super(PulseItem, self).__init__("Pulse_1", [
             ("frequency", float, 1),
             ("amplitude", float, 1),
             ("phase", float, 1),
@@ -250,9 +251,39 @@ class PulseItem(FormItem):
         return td_str
 
 
+class SequencesGroupItem(GroupItem):
+    def __init__(self, pulses_item):
+        super(SequencesGroupItem, self).__init__("Pulse Sequences", "Sequence", SequenceItem)
+        self.pulses_item = pulses_item
+
+
+class SequenceItem(FormItem):
+    def __init__(self, group):
+        super(SequenceItem, self).__init__("Sequence_1", [])
+        self.group = group
+        add_pulse_button = QPushButton("Add Pulse")
+        add_wait_button = QPushButton("Add Wait")
+        add_item_layout = QHBoxLayout()
+        add_item_layout.addWidget(add_pulse_button)
+        add_item_layout.addWidget(add_wait_button)
+        add_pulse_button.clicked.connect(self.add_pulse)
+        add_wait_button.clicked.connect(self.add_wait)
+        params_widget = QWidget()
+        params_layout = QVBoxLayout(params_widget)
+        params_layout.addWidget(self.params_widget)
+        params_layout.addLayout(add_item_layout)
+        self.params_widget = params_widget
+
+    def add_pulse(self):
+        self.add_field("Pulse", self.group.pulses_item, None)
+
+    def add_wait(self):
+        self.add_field("Wait (time)", float, 0)
+
+
 class SimulationItem(FormItem):
     def __init__(self):
-        super(SimulationItem, self).__init__("Simulation", [
+        super(SimulationItem, self).__init__("Simulation_1", [
             ("time", float, 10),
             ("steps", int, 100),
         ])
@@ -261,9 +292,9 @@ class SimulationItem(FormItem):
         self.states = None
 
     def compute(self, hamiltonian, init_state, collapse_ops, args):
-        tlist = linspace(0, self.time, self.steps)
+        time_list = linspace(0, self.time, self.steps)
         win.set_status("Computing States...")
-        self.states = mesolve(hamiltonian, init_state, tlist, collapse_ops, [], args).states
+        self.states = mesolve(hamiltonian, init_state, time_list, collapse_ops, [], args).states
         win.set_status("")
         self.dirty = False
 
@@ -276,22 +307,14 @@ class SetupItem(FormItem):
         self.simulations_item = GroupItem("Analyses", "Simulation", SimulationItem)
         self.outputs_item = OutputsGroupItem(self.modes_item, self.simulations_item)
         self.pulses_item = GroupItem("Pulses", "Pulse", PulseItem)
+        self.sequences_item = SequencesGroupItem(self.pulses_item)
 
         self.appendRow(self.modes_item)
         self.appendRow(self.cross_mode_terms_item)
         self.appendRow(self.pulses_item)
+        self.appendRow(self.sequences_item)
         self.appendRow(self.simulations_item)
         self.appendRow(self.outputs_item)
-
-        self.mode_count = 0
-
-        def increment_mode_count(item):
-            self.mode_count += 1
-
-        def decrement_mode_count():
-            self.mode_count -= 1
-
-        self.modes_item.emitter.item_created.connect(increment_mode_count)
 
         def add_compute_action(item):
             item.context_menu.add_action("Compute", lambda: self.compute(item))
@@ -301,6 +324,7 @@ class SetupItem(FormItem):
         self.modes_item.add_item(dialog=False)
         self.simulations_item.add_item(dialog=False)
         self.outputs_item.add_item(dialog=False)
+        self.pulses_item.add_item(dialog=False)
 
     def compute(self, sim_item):
         modes = self.modes_item.items_list()
@@ -421,7 +445,7 @@ class MainWindow(QMainWindow):
     def set_eqn_pixmap(self, suffix):
         if suffix:
             suffix = "_" + suffix
-        path = os.path.join("latex", "eqn%s.png"%suffix)
+        path = os.path.join("latex", "eqn%s.png" % suffix)
         self.eqn_widget.set_file(path)
 
     def set_status(self, msg):

@@ -97,9 +97,12 @@ class MySpinBox(QSpinBox):
 
 class ItemsComboBox(MyComboBox):
     def __init__(self, group_item, *args, **kwargs):
-        items = group_item.items_list()
-        names = [str(i.text()) for i in items]
+        self.items_list = group_item.items_list()
+        names = [str(i.text()) for i in self.items_list]
         super(ItemsComboBox, self).__init__(names, *args, **kwargs)
+
+    def get_item(self):
+        return self.items_list[self.currentIndex()]
 
 
 class FormItem(QStandardItem):
@@ -109,34 +112,42 @@ class FormItem(QStandardItem):
         self.name = lambda: str(self.text())
         self.names, _, _ = zip(*fields)
         self.dtypes = {method_style(n): d for n, d, _ in fields}
-        widgets = {}
-        for n, d, _ in fields:
-            n = word_style(n)
-            if d is int:
-                widgets[n] = MySpinBox, "value", "setValue"
-            elif d is float:
-                widgets[n] = QDoubleSpinBox, "value", "setValue"
-            elif isinstance(d, bool):
-                widgets[n] = QCheckBox, "isChecked", "setChecked"
-            elif isinstance(d, (list, tuple)):
-                self.dtypes[method_style(n)] = str
-                widgets[n] = lambda grp=d, **kwargs: MyComboBox(grp, **kwargs), "currentText", "set_current_text"
-            elif isinstance(d, GroupItem):
-                self.dtypes[method_style(n)] = lambda i_name, grp=d: grp.item_from_name(i_name)
-                widgets[n] = lambda grp=d, **kwargs: ItemsComboBox(grp, **kwargs), "currentText", "set_current_text"
+        self.widgets = {}
         self.method_names = [method_style(n) for n in self.names]
         self.val_items = {method_style(n): QStandardItem(str(v)) for n, _, v in fields}
         self.params_model = QStandardItemModel()
         self.params_model.itemChanged.connect(self.update_name)
-        for name in self.names:
-            self.params_model.appendRow([ConstantItem(word_style(name)), self.val_items[method_style(name)]])
         self.params_widget = QTableView()
-        self.params_widget.setItemDelegate(FormDelegate(self.params_model, widgets))
         self.params_widget.setModel(self.params_model)
-        self.params_widget.resizeRowsToContents()
+        self.params_widget.setItemDelegate(FormDelegate(self.params_model, self.widgets))
         self.params_widget.horizontalHeader().hide()
         self.params_widget.verticalHeader().hide()
+
+        for name, item_type, default in fields:
+            self.add_field(name, item_type, default)
+        self.params_widget.resizeRowsToContents()
         self.context_menu = ActionsMenu([("Properties", self.params_widget.show)])
+
+    def add_field(self, word_name, item_type, value):
+        word_name = word_style(word_name)
+        method_name = method_style(word_name)
+        if item_type is int:
+            self.widgets[word_name] = MySpinBox, "value", "setValue"
+        elif item_type is float:
+            self.widgets[word_name] = QDoubleSpinBox, "value", "setValue"
+        elif isinstance(item_type, bool):
+            self.widgets[word_name] = QCheckBox, "isChecked", "setChecked"
+        elif isinstance(item_type, (list, tuple)):
+            self.dtypes[method_name] = str
+            self.widgets[word_name] = \
+                lambda grp=item_type, **kwargs: MyComboBox(grp, **kwargs), "currentText", "set_current_text"
+        elif isinstance(item_type, GroupItem):
+            value = item_type.items_list()[0].text()
+            self.dtypes[method_name] = lambda i_name, grp=item_type: grp.item_from_name(i_name)
+            self.widgets[word_name] = \
+                lambda grp=item_type, **kwargs: ItemsComboBox(grp, **kwargs), "currentText", "set_current_text"
+        self.val_items[method_name] = QStandardItem(str(value))
+        self.params_model.appendRow([ConstantItem(word_name), self.val_items[method_name]])
 
     def set_name(self, name):
         self.setText(name)
@@ -165,9 +176,7 @@ class FormDelegate(QStyledItemDelegate):
         if idx.column() == 1:
             name = str(self.model.itemFromIndex(idx.sibling(idx.row(), 0)).text())
             self.item_editor_activated.emit(name)
-            print name
             if name in self.widgets_dict:
-                print 'in'
                 w = self.widgets_dict[name][0]()
                 w.setParent(parent)
                 return w
