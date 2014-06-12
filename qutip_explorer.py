@@ -1,6 +1,6 @@
 from PyQt4.QtCore import QSettings
 from PyQt4.QtGui import QApplication, QMainWindow, QProgressBar, QGroupBox, QRadioButton, QDockWidget, QWidget, \
-    QHBoxLayout, QPushButton
+    QHBoxLayout, QPushButton, QMessageBox
 from numpy import linspace
 from pyqtgraph import ImageView, PlotWidget
 from pyqtgraph.dockarea import DockArea, Dock
@@ -24,8 +24,8 @@ class ModeItem(FormItem):
             ("anharmonicity", float, 0),
             ("decay", float, 0),
             ("dephasing", float, 0),
-            ("drive amplitude", float, 0),
-            ("drive angle", float, 0),
+            ("drive amplitude", float, 1),
+            ("drive angle degrees", float, 0),
             ("fock state", int, 0),
             ("initial displacement", float, 0),
             ("leg count", int, 1),
@@ -57,17 +57,23 @@ class ModeItem(FormItem):
     def tensor_index(self):
         return self.group.items_list().index(self)
 
+    def operator_on_self(self, op):
+        return self.group.operator_on_indices([(op, self.tensor_index())])
+
+    def destroy(self):
+        return self.operator_on_self(destroy(self.dimension))
+
     def hamiltonian(self):
-        a = destroy(self.dimension)
+        a = self.destroy()
         ad = a.dag()
         f0 = self.frequency
         k = self.anharmonicity
         return f0*ad*a + k*ad*ad*a*a
 
     def drive_hamiltonian(self):
-        a = destroy(self.dimension)
+        a = self.destroy()
         ad = a.dag()
-        th = self.drive_angle
+        th = pi * self.drive_angle_degrees / 180
         amp = self.drive_amplitude
         return amp*(exp(1j*th)*ad + exp(-1j*th)*a)
 
@@ -81,14 +87,26 @@ class ModeItem(FormItem):
         return sum(disp_op(n)*init_state for n in range(self.leg_count))
 
     def collapse_ops(self):
-        a = destroy(self.dimension)
+        a = self.destroy()
         return [self.decay*a, self.dephasing*a.dag()*a]
+
+class ModesGroupItem(GroupItem):
+    def __init__(self, setup):
+        super(ModesGroupItem, self).__init__("Modes", "Mode", ModeItem, setup)
+
+    def operator_on_indices(self, h_idx_pairs):
+        op_list = [qeye(m.dimension) for m in self.items_list()]
+        for h, idx in h_idx_pairs:
+            op_list[idx] = h
+        return tensor(*op_list)
+
+    def initial_state(self):
+        return tensor(*[m.initial_state for m in self.items_list()])
 
 
 class CrossModeGroupItem(GroupItem):
-    def __init__(self, modes_item):
-        super(CrossModeGroupItem, self).__init__("Cross-Mode Terms", "Cross-Mode Term", CrossModeItem)
-        self.modes_item = modes_item
+    def __init__(self, setup):
+        super(CrossModeGroupItem, self).__init__("Cross-Mode Terms", "Cross-Mode Term", CrossModeItem, setup)
         self.context_menu.add_action('Add Terms From Matrix', self.add_from_matrix)
 
         self.array_model = UpperHalfArrayModel()
@@ -103,9 +121,17 @@ class CrossModeGroupItem(GroupItem):
         type_layout.addWidget(self.xx_type_radio)
         self.dialog = OKCancelDialog(QLabel("Mode Array"), array_view, type_group)
 
+    def add_item(self, dialog=True):
+        if self.setup.modes_item.rowCount() < 2:
+            message_box.setIcon(QMessageBox.Warning)
+            message_box.setText("Need more than two modes")
+            message_box.exec_()
+        else:
+            return super(CrossModeGroupItem, self).add_item(dialog=dialog)
+
     def add_from_matrix(self):
-        self.array_model.set_n(self.modes_item.rowCount())
-        names = [m.text() for m in self.modes_item.items_list()]
+        self.array_model.set_n(self.setup.modes_item.rowCount())
+        names = [m.text() for m in self.setup.modes_item.items_list()]
         self.array_model.setHorizontalHeaderLabels(names)
         self.array_model.setVerticalHeaderLabels(names)
         if self.dialog.exec_():
@@ -118,42 +144,34 @@ class CrossModeGroupItem(GroupItem):
             for i, row in enumerate(self.array_model.array):
                 for j, val in enumerate(row):
                     if val:
-                        self.appendRow(CrossModeItem(type_str, val, i, j, self.modes_item))
+                        self.appendRow(CrossModeItem(type_str, val, i, j, self.setup.modes_item))
 
 
 class CrossModeItem(FormItem):
     def __init__(self, group, term_type="Cross-Kerr", val=1, mode_1=0, mode_2=1):
+        self.group = group
         name = term_type + str((mode_1, mode_2))
-        modes = group.modes_item.items_list()
         super(CrossModeItem, self).__init__(name, [
             ("term type", ["Cross-Kerr", "X-X"], term_type),
             ("strength", float, val),
-            ("mode 1", group.modes_item, modes[mode_1].text()),
-            ("mode 2", group.modes_item, modes[mode_2].text()),
+            ("mode 1", group.setup.modes_item, None),
+            ("mode 2", group.setup.modes_item, None),
         ])
 
-    def hamiltonian(self, mode_list):
-        ops_list = [qeye(m.dimension) for m in mode_list]
-        if self.term_type == "Cross-Kerr":
-            n1 = num(self.mode_list[self.mode_1 - 1].dimension)
-            n2 = num(self.mode_list[self.mode_2 - 1].dimension)
-            ops_list[self.mode_1 - 1] = n1
-            ops_list[self.mode_2 - 1] = n2
-            return tensor(*ops_list)
+    def hamiltonian(self):
+        idx_1 = self.mode_1.tensor_index()
+        idx_2 = self.mode_2.tensor_index()
+        op = num if self.term_type == "Cross-Kerr" else destroy
+        op_1 = op(self.mode_1.dimension)
+        op_2 = op(self.mode_2.dimension)
+        h = self.group.setup.modes_item.operator_on_indices([(op_1, idx_1), (op_2, idx_2)])
         if self.term_type == "X-X":
-            a1 = destroy(self.mode_list[self.mode_1 - 1].dimension)
-            a2 = destroy(self.mode_list[self.mode_2 - 1].dimension)
-            ops_list[self.mode_1 - 1] = a1
-            ops_list[self.mode_2 - 1] = a2.dag()
-            return tensor(*ops_list) + tensor(*ops_list).dag()
-
+            h += h.dag()
+        return h
 
 class OutputsGroupItem(GroupItem):
-    def __init__(self, modes_item, sims_item):
-        super(OutputsGroupItem, self).__init__("Outputs", "Output", OutputItem)
-        self.sims_item = sims_item
-        self.modes_item = modes_item
-
+    def __init__(self, setup):
+        super(OutputsGroupItem, self).__init__("Outputs", "Output", OutputItem, setup)
 
 class MyImageView(ImageView):
     def __init__(self):
@@ -171,8 +189,8 @@ class MyImageView(ImageView):
 class OutputItem(FormItem):
     def __init__(self, group):
         super(OutputItem, self).__init__("Output_1", [
-            ("simulation", group.sims_item, group.sims_item.items_list()[0].name()),
-            ("mode", group.modes_item, group.modes_item.items_list()[0].name()),
+            ("simulation", group.setup.sims_item, group.setup.sims_item.items_list()[0].name()),
+            ("mode", group.setup.modes_item, group.setup.modes_item.items_list()[0].name()),
             ("report type", ["Wigner", "Expect-XYZ"], "Wigner"),
             ("wigner range", float, 5),
             ("wigner resolution", int, 100),
@@ -197,7 +215,8 @@ class OutputItem(FormItem):
         n_states = len(self.simulation.states)
         for i, s in enumerate(self.simulation.states):
             output_steps.append(step_function(s.ptrace(self.mode.tensor_index())))
-            win.set_progress(i/n_states)
+            win.set_progress(100*float(i)/n_states)
+        win.set_progress(0)
         win.set_status("")
 
         self.data = np.array(output_steps)
@@ -231,30 +250,41 @@ class OutputItem(FormItem):
 
 
 class PulseItem(FormItem):
-    def __init__(self):
+    def __init__(self, group):
         super(PulseItem, self).__init__("Pulse_1", [
             ("frequency", float, 1),
             ("amplitude", float, 1),
-            ("phase", float, 1),
+            ("phase", float, 0),
             ("profile", ["Square", "Gaussian"], "Square"),
             ("duration", float, 1),
             ("sigma", float, 1),
         ])
+        self.group = group
+
+    def mesolve_args(self):
+        return {
+            'amp': self.amplitude,
+            'omega': self.frequency,
+            'phase': self.phase,
+            't0': self.duration/2.,
+            'sigma': self.sigma,
+        }
 
     def time_dependence(self):
-        td_str = "amp*cos(omega * t + phi)"
-        args = {'amp': self.amplitude, 'omega': self.frequency}
+        td_str = "amp*cos(omega * t + phase)"
         if self.profile == "Gaussian":
             td_str += "*exp((t-t0)**2/sigma**2)"
-            args['t0'] = self.duration/2.
-            args['sigma'] = self.sigma
         return td_str
+
+    def hamiltonian(self, modes):
+        modes_item = self.group.setup.modes_item
+        h = sum(m.drive_hamiltonian() for m in modes_item.items_list())
+        return [h, self.time_dependence()]
 
 
 class SequencesGroupItem(GroupItem):
-    def __init__(self, pulses_item):
-        super(SequencesGroupItem, self).__init__("Pulse Sequences", "Sequence", SequenceItem)
-        self.pulses_item = pulses_item
+    def __init__(self, setup):
+        super(SequencesGroupItem, self).__init__("Pulse Sequences", "Sequence", SequenceItem, setup)
 
 
 class SequenceItem(FormItem):
@@ -273,83 +303,106 @@ class SequenceItem(FormItem):
         params_layout.addWidget(self.params_widget)
         params_layout.addLayout(add_item_layout)
         self.params_widget = params_widget
+        self.n_steps = 0
 
     def add_pulse(self):
-        self.add_field("Pulse", self.group.pulses_item, None)
+        self.n_steps += 1
+        self.add_field("Pulse Step %d" % self.n_steps, self.group.setup.pulses_item, None)
 
     def add_wait(self):
-        self.add_field("Wait (time)", float, 0)
+        self.n_steps += 1
+        self.add_field("Wait Step %d" % self.n_steps, float, 1)
 
+    def get_steps(self):
+        steps = []
+        for i in range(1, self.n_steps + 1):
+            try:
+                pulse_item = self.__getattr__("pulse_step_%d" % i)
+                steps.append(
+                    (pulse_item.hamiltonian(self.group.setup.modes_item.items_list()),
+                     pulse_item.duration,  pulse_item.mesolve_args())
+                )
+            except AttributeError as e:
+                try:
+                    wait_time = self.__getattr__("wait_step_%d" % i)
+                except AttributeError:
+                    raise e
+                steps.append((None, wait_time, {}))
+        return steps
+
+
+class SimulationsGroupItem(GroupItem):
+    def __init__(self, setup):
+        super(SimulationsGroupItem, self).__init__("Analysis", "Simulation", SimulationItem, setup)
 
 # TODO: Better name than Simulation
 # TODO: Simple Simulations & Sequence Simulations
 class SimulationItem(FormItem):
-    def __init__(self):
+    def __init__(self, group):
         super(SimulationItem, self).__init__("Simulation_1", [
-            ("time", float, 10),
-            ("steps", int, 100),
+            #("time", float, 10),
+            ("sequence", group.setup.sequences_item, None),
+            ("time step", float, 0.1),
         ])
-
+        self.group = group
         self.dirty = True
         self.states = None
 
-    def compute(self, hamiltonian, init_state, collapse_ops, args):
-        time_list = linspace(0, self.time, self.steps)
-        win.set_status("Computing States...")
-        self.states = mesolve(hamiltonian, init_state, time_list, collapse_ops, [], args).states
-        win.set_status("")
-        self.dirty = False
+    def compute(self, h0, init_state, collapse_ops):
+        self.states = []
+        start_time = 0
+        for i, (h1, duration, args) in enumerate(self.sequence.get_steps()):
+            end_time = start_time + duration
+            time_list = arange(start_time, end_time, self.time_step)
+            if h1 is not None:
+                hamiltonian = [h0, h1]
+            else:
+                hamiltonian = h0
+            win.set_status("Computing States for Step %d..." % (i+1))
+            new_states = mesolve(hamiltonian, init_state, time_list, collapse_ops, [], args).states
+            self.states.extend(new_states)
+            init_state = new_states[-1]
+            start_time = end_time
+            win.set_status("")
+            self.dirty = False
 
 # TODO: Parametric Sweep Group
 class SetupItem(FormItem):
     def __init__(self):
         super(SetupItem, self).__init__("Setup", [])
-        self.modes_item = GroupItem("Modes", "Mode", ModeItem)
-        self.cross_mode_terms_item = CrossModeGroupItem(self.modes_item)
-        self.simulations_item = GroupItem("Analyses", "Simulation", SimulationItem)
-        self.outputs_item = OutputsGroupItem(self.modes_item, self.simulations_item)
-        self.pulses_item = GroupItem("Pulses", "Pulse", PulseItem)
-        self.sequences_item = SequencesGroupItem(self.pulses_item)
+        self.modes_item = ModesGroupItem(self)
+        self.cross_mode_terms_item = CrossModeGroupItem(self)
+        self.pulses_item = GroupItem("Pulses", "Pulse", PulseItem, self)
+        self.sequences_item = SequencesGroupItem(self)
+        self.sims_item = SimulationsGroupItem(self)
+        self.outputs_item = OutputsGroupItem(self)
 
         self.appendRow(self.modes_item)
         self.appendRow(self.cross_mode_terms_item)
         self.appendRow(self.pulses_item)
         self.appendRow(self.sequences_item)
-        self.appendRow(self.simulations_item)
+        self.appendRow(self.sims_item)
         self.appendRow(self.outputs_item)
 
         def add_compute_action(item):
             item.context_menu.add_action("Compute", lambda: self.compute(item))
 
-        self.simulations_item.emitter.item_added.connect(add_compute_action)
+        self.sims_item.emitter.item_added.connect(add_compute_action)
 
         self.modes_item.add_item(dialog=False)
-        self.simulations_item.add_item(dialog=False)
-        self.outputs_item.add_item(dialog=False)
         self.pulses_item.add_item(dialog=False)
+        self.sequences_item.add_item(dialog=False)
+        self.sims_item.add_item(dialog=False)
+        self.outputs_item.add_item(dialog=False)
 
     def compute(self, sim_item):
         modes = self.modes_item.items_list()
-        H0 = 0
-        for i, mode in enumerate(modes):
-            ops_list = [qeye(m.dimension) for m in modes]
-            ops_list[i] = mode.hamiltonian()
-            H0 += tensor(*ops_list)
-
-        for term in self.cross_mode_terms_item.items_list():
-            H0 += term.hamiltonian(modes)
-
+        H0 = sum(m.hamiltonian() for m in modes) + \
+             sum(t.hamiltonian() for t in self.cross_mode_terms_item.items_list())
         init_state = tensor(*[m.initial_state() for m in modes])
+        c_ops = sum([m.collapse_ops() for m in modes], [])
 
-        c_ops = []
-        for i, mode in enumerate(modes):
-            ops_list = [qeye(m.dimension) for m in modes]
-            ops_list[i] = sum(mode.collapse_ops())
-            c_ops.append(tensor(*ops_list))
-
-        args = {}
-
-        sim_item.compute(H0, init_state, c_ops, args)
+        sim_item.compute(H0, init_state, c_ops)
 
         for output in self.outputs_item.items_list():
             if output.simulation is sim_item:
@@ -470,4 +523,5 @@ if __name__ == '__main__':
     win = MainWindow()
     win.show()
     win.resize(1000, 800)
+    message_box = QMessageBox()
     sys.exit(app.exec_())

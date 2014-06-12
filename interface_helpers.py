@@ -1,4 +1,4 @@
-from PyQt4.QtCore import QAbstractTableModel, Qt, pyqtSignal, QObject
+from PyQt4.QtCore import QAbstractTableModel, Qt, pyqtSignal, QObject, QPoint
 from PyQt4.QtGui import QStandardItem, QComboBox, QSpinBox, QDoubleSpinBox, QCheckBox, QStandardItemModel, QTableView, \
     QStyledItemDelegate, QMenu, QAction, QDialog, QVBoxLayout, QDialogButtonBox, QTreeView, QLabel, QPixmap
 
@@ -113,9 +113,9 @@ class FormItem(QStandardItem):
         fields = [("Name", str, name)] + fields
         self.name = lambda: str(self.text())
         self.names, _, _ = zip(*fields)
-        self.dtypes = {method_style(n): d for n, d, _ in fields}
+        self.dtypes = {}
         self.widgets = {}
-        self.method_names = [method_style(n) for n in self.names]
+        self.method_names = []
         self.val_items = {method_style(n): QStandardItem(str(v)) for n, _, v in fields}
         self.params_model = QStandardItemModel()
         self.params_model.itemChanged.connect(self.update_name)
@@ -134,10 +134,13 @@ class FormItem(QStandardItem):
         word_name = word_style(word_name)
         method_name = method_style(word_name)
         if item_type is int:
+            self.dtypes[method_name] = int
             self.widgets[word_name] = MySpinBox, "value", "setValue"
         elif item_type is float:
+            self.dtypes[method_name] = float
             self.widgets[word_name] = QDoubleSpinBox, "value", "setValue"
         elif isinstance(item_type, bool):
+            self.dtypes[method_name] = bool
             self.widgets[word_name] = QCheckBox, "isChecked", "setChecked"
         elif isinstance(item_type, (list, tuple)):
             self.dtypes[method_name] = str
@@ -150,6 +153,7 @@ class FormItem(QStandardItem):
                 lambda grp=item_type, **kwargs: ItemsComboBox(grp, **kwargs), "currentText", "set_current_text"
         self.val_items[method_name] = QStandardItem(str(value))
         self.params_model.appendRow([ConstantItem(word_name), self.val_items[method_name]])
+        self.method_names.append(method_name)
 
     def set_name(self, name):
         self.setText(name)
@@ -237,11 +241,12 @@ class GroupItemEmitter(QObject):
 
 
 class GroupItem(ConstantItem):
-    def __init__(self, group_name, item_name, item_class):
+    def __init__(self, group_name, item_name, item_class, setup=None):
         super(GroupItem, self).__init__(group_name)
         self.context_menu = ActionsMenu([('Add ' + item_name, self.add_item)])
         self.item_class = item_class
         self.emitter = GroupItemEmitter()
+        self.setup = setup
 
     def add_item(self, dialog=True):
         try:
@@ -280,7 +285,8 @@ class ContextMenuStandardTreeView(QTreeView):
     def show_context_menu(self, point):
         item = self.model().itemFromIndex(self.indexAt(point))
         if hasattr(item, "context_menu"):
-            item.context_menu.exec_(self.mapToGlobal(point))
+            # TODO: Fix context menu positioning hack
+            item.context_menu.exec_(self.mapToGlobal(point) + QPoint(0, 25))
             return True
         elif item is None and hasattr(self, "context_menu"):
             self.context_menu.exec_(self.mapToGlobal(point))
