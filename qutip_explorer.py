@@ -219,11 +219,12 @@ class OutputItem(FormItem):
         win.set_progress(0)
         win.set_status("")
 
-        self.data = np.array(output_steps)
-        if self.report_type == "Wigner":
-            self.plot_wigner()
-        elif self.report_type == "Expect-XYZ":
-            self.plot_xyz()
+        if output_steps:
+            self.data = np.array(output_steps)
+            if self.report_type == "Wigner":
+                self.plot_wigner()
+            elif self.report_type == "Expect-XYZ":
+                self.plot_xyz()
 
     def plot_type(self):
         return {
@@ -351,7 +352,12 @@ class SimulationItem(FormItem):
     def compute(self, h0, init_state, collapse_ops):
         self.states = []
         start_time = 0
-        for i, (h1, duration, args) in enumerate(self.sequence.get_steps()):
+        steps = self.sequence.get_steps()
+        if not steps:
+            message_box.setText("No Steps in Sequence to Simulate")
+            message_box.exec_()
+            return
+        for i, (h1, duration, args) in enumerate(steps):
             end_time = start_time + duration
             time_list = arange(start_time, end_time, self.time_step)
             if h1 is not None:
