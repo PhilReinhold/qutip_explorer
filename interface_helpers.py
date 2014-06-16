@@ -259,13 +259,13 @@ class GroupItem(ConstantItem):
             i.set_name(increment_name(str(i.text())))
         if dialog and hasattr(i, 'params_widget'):
             d = OKCancelDialog(i.params_widget)
-            if d.exec_():
+            if not d.exec_():
+                return None
+            else:
                 i.params_widget.setParent(None)
-                self.appendRow(i)
-                self.emitter.item_added.emit(i)
-        else:
-            self.appendRow(i)
-            self.emitter.item_added.emit(i)
+        self.appendRow(i)
+        self.emitter.item_added.emit(i)
+        return i
 
     def items_list(self):
         return [self.child(i) for i in range(self.rowCount())]

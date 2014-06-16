@@ -210,7 +210,11 @@ class OutputItem(FormItem):
             axis = linspace(-dx, dx, nx)
             step_function = lambda state: wigner(state, axis, axis)
         else:
-            step_function = lambda state: [expect(state, jmat(2, d)) for d in 'xyz']
+            dim = self.mode.dimension
+            a = destroy(dim)
+            ad = a.dag()
+            ops = [a + ad, 1j*(a - ad), a*ad]
+            step_function = lambda state: [expect(op, state) for op in ops]
 
         n_states = len(self.simulation.states)
         for i, s in enumerate(self.simulation.states):
@@ -233,21 +237,28 @@ class OutputItem(FormItem):
         }[self.report_type]
 
     def check_dock(self):
+        if self.plot is not None:
+            self.plot.setParent(None)
+        self.plot = self.plot_type()()
         if self.dock is None:
-            self.plot = self.plot_type()()
             self.dock = Dock(self.name(), widget=self.plot)
             win.outputs_dock_area.addDock(self.dock)
+        else:
+            self.dock.addWidget(self.plot)
 
     def plot_wigner(self):
-        self.check_dock()
         if not isinstance(self.plot, ImageView):
-            self.plot.setParent(None)
-            self.plot = ImageView()
+            self.check_dock()
         self.plot.setImage(self.data)
 
     # TODO: Bloch/XYZ plot output implementation
     def plot_xyz(self):
-        pass
+        if not isinstance(self.plot, PlotWidget):
+            self.check_dock()
+        self.plot.clear()
+        self.plot.addLegend()
+        for trace, name, pen in zip(self.data.transpose(), 'XYZ', 'rgb'):
+            self.plot.plot(self.simulation.times, trace, pen=pen, name=name)
 
 
 class PulseItem(FormItem):
@@ -353,6 +364,7 @@ class SimulationItem(FormItem):
         self.states = []
         start_time = 0
         steps = self.sequence.get_steps()
+        self.times = []
         if not steps:
             message_box.setText("No Steps in Sequence to Simulate")
             message_box.exec_()
@@ -360,6 +372,7 @@ class SimulationItem(FormItem):
         for i, (h1, duration, args) in enumerate(steps):
             end_time = start_time + duration
             time_list = arange(start_time, end_time, self.time_step)
+            self.times.extend(list(time_list))
             if h1 is not None:
                 hamiltonian = [h0, h1]
             else:
@@ -397,9 +410,11 @@ class SetupItem(FormItem):
 
         self.modes_item.add_item(dialog=False)
         self.pulses_item.add_item(dialog=False)
-        self.sequences_item.add_item(dialog=False)
+        seq = self.sequences_item.add_item(dialog=False)
         self.sims_item.add_item(dialog=False)
         self.outputs_item.add_item(dialog=False)
+
+        seq.add_pulse()
 
     def compute(self, sim_item):
         modes = self.modes_item.items_list()
