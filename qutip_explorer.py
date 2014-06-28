@@ -1,8 +1,9 @@
 from PyQt4.QtCore import QSettings
 from PyQt4.QtGui import QApplication, QMainWindow, QProgressBar, QGroupBox, QRadioButton, QDockWidget, QWidget, \
     QHBoxLayout, QPushButton, QMessageBox
+import itertools
 from numpy import linspace
-from pyqtgraph import ImageView, PlotWidget
+from pyqtgraph import ImageView, PlotWidget, setConfigOption, mkPen
 from pyqtgraph.dockarea import DockArea, Dock
 from qutip import *
 from interface_helpers import *
@@ -10,13 +11,17 @@ from interface_helpers import *
 __author__ = "Phil Reinhold"
 __version__ = 0.1
 __ui_version__ = 1
+setConfigOption('background', 'w')
+setConfigOption('foreground', 'k')
+pen_list = [mkPen(color, width=2) for color in 'bgrcmyk']
+pen_generator = itertools.cycle(pen_list)
 
 class ModeItemEmitter(QObject):
     mode_form_focus_in = pyqtSignal(str)
     mode_form_focus_out = pyqtSignal(str)
 
 
-class ModeItem(FormItem):
+class ModeItem(GroupItemChild):
     def __init__(self, group):
         super(ModeItem, self).__init__("Mode_1", [
             ("dimension", int, 2),
@@ -29,9 +34,8 @@ class ModeItem(FormItem):
             ("fock state", int, 0),
             ("initial displacement", float, 0),
             ("leg count", int, 1),
-        ])
-        self.group = group
-        # Initial-leg-phases
+        ], group)
+        # TODO: Initial-leg-phases
 
         eqn_associations = {
             "Frequency": "freq",
@@ -147,16 +151,15 @@ class CrossModeGroupItem(GroupItem):
                         self.appendRow(CrossModeItem(type_str, val, i, j, self.setup.modes_item))
 
 
-class CrossModeItem(FormItem):
+class CrossModeItem(GroupItemChild):
     def __init__(self, group, term_type="Cross-Kerr", val=1, mode_1=0, mode_2=1):
-        self.group = group
         name = term_type + str((mode_1, mode_2))
         super(CrossModeItem, self).__init__(name, [
             ("term type", ["Cross-Kerr", "X-X"], term_type),
             ("strength", float, val),
             ("mode 1", group.setup.modes_item, None),
             ("mode 2", group.setup.modes_item, None),
-        ])
+        ], group)
 
     def hamiltonian(self):
         idx_1 = self.mode_1.tensor_index()
@@ -186,7 +189,7 @@ class MyImageView(ImageView):
         self.setLevels(-max_value, max_value)
 
 
-class OutputItem(FormItem):
+class OutputItem(GroupItemChild):
     def __init__(self, group):
         super(OutputItem, self).__init__("Output_1", [
             ("simulation", group.setup.sims_item, group.setup.sims_item.items_list()[0].name()),
@@ -194,7 +197,7 @@ class OutputItem(FormItem):
             ("report type", ["Wigner", "Expect-XYZ"], "Wigner"),
             ("wigner range", float, 5),
             ("wigner resolution", int, 100),
-        ])
+        ], group)
 
         self.context_menu.add_action("Re-Compute", self.compute)
         self.data = None
@@ -257,11 +260,11 @@ class OutputItem(FormItem):
             self.check_dock()
         self.plot.clear()
         self.plot.addLegend()
-        for trace, name, pen in zip(self.data.transpose(), 'XYZ', 'rgb'):
+        for trace, name, pen in zip(self.data.transpose(), 'XYZ', pen_generator):
             self.plot.plot(self.simulation.times, trace, pen=pen, name=name)
 
 
-class PulseItem(FormItem):
+class PulseItem(GroupItemChild):
     def __init__(self, group):
         super(PulseItem, self).__init__("Pulse_1", [
             ("frequency", float, 1),
@@ -270,8 +273,7 @@ class PulseItem(FormItem):
             ("profile", ["Square", "Gaussian"], "Square"),
             ("duration", float, 1),
             ("sigma", float, 1),
-        ])
-        self.group = group
+        ], group)
 
     def mesolve_args(self):
         return {
@@ -299,10 +301,9 @@ class SequencesGroupItem(GroupItem):
         super(SequencesGroupItem, self).__init__("Pulse Sequences", "Sequence", SequenceItem, setup)
 
 
-class SequenceItem(FormItem):
+class SequenceItem(GroupItemChild):
     def __init__(self, group):
-        super(SequenceItem, self).__init__("Sequence_1", [])
-        self.group = group
+        super(SequenceItem, self).__init__("Sequence_1", [], group)
         add_pulse_button = QPushButton("Add Pulse")
         add_wait_button = QPushButton("Add Wait")
         add_item_layout = QHBoxLayout()
@@ -349,14 +350,13 @@ class SimulationsGroupItem(GroupItem):
 
 # TODO: Better name than Simulation
 # TODO: Simple Simulations & Sequence Simulations
-class SimulationItem(FormItem):
+class SimulationItem(GroupItemChild):
     def __init__(self, group):
         super(SimulationItem, self).__init__("Simulation_1", [
             #("time", float, 10),
             ("sequence", group.setup.sequences_item, None),
             ("time step", float, 0.1),
-        ])
-        self.group = group
+        ], group)
         self.dirty = True
         self.states = None
 

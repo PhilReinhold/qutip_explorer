@@ -1,6 +1,6 @@
 from PyQt4.QtCore import QAbstractTableModel, Qt, pyqtSignal, QObject, QPoint
 from PyQt4.QtGui import QStandardItem, QComboBox, QSpinBox, QDoubleSpinBox, QCheckBox, QStandardItemModel, QTableView, \
-    QStyledItemDelegate, QMenu, QAction, QDialog, QVBoxLayout, QDialogButtonBox, QTreeView, QLabel, QPixmap
+    QStyledItemDelegate, QMenu, QAction, QDialog, QVBoxLayout, QDialogButtonBox, QTreeView, QLabel, QPixmap, QMessageBox
 
 
 def print_fn(*s):
@@ -8,12 +8,23 @@ def print_fn(*s):
 
 
 def method_style(s):
-    return s.lower().replace(" ", "_")
+    return str(s).lower().replace(" ", "_")
 
 
 def word_style(s):
-    return " ".join("".join([w[0].upper(), w[1:]]) for w in s.replace("_", " ").split())
+    return " ".join("".join([w[0].upper(), w[1:]]) for w in str(s).replace("_", " ").split())
 
+
+def error_message(message, title=None, warning=False):
+    message_box = QMessageBox()
+    message_box.setText(message)
+    if title is not None:
+        message_box.setWindowTitle(title)
+    if warning:
+        message_box.setIcon(QMessageBox.Warning)
+    else:
+        message_box.setIcon(QMessageBox.Critical)
+    message_box.exec_()
 
 class ArrayModel(QAbstractTableModel):
     def __init__(self, array=None):
@@ -117,6 +128,7 @@ class FormItem(QStandardItem):
         self.widgets = {}
         self.method_names = []
         self.val_items = {method_style(n): QStandardItem(str(v)) for n, _, v in fields}
+        self.group_items = {}
         self.params_model = QStandardItemModel()
         self.params_model.itemChanged.connect(self.update_name)
         self.params_widget = QTableView()
@@ -128,7 +140,20 @@ class FormItem(QStandardItem):
         for name, item_type, default in fields:
             self.add_field(name, item_type, default)
         self.params_widget.resizeRowsToContents()
-        self.context_menu = ActionsMenu([("Properties", self.params_widget.show)])
+        self.context_menu = ActionsMenu([])
+
+        self.params_model.itemChanged.connect(self.notify_group_item_children)
+
+    def notify_group_item_children(self, item):
+        method_name = method_style(self.params_model.item(item.row(), 0).text())
+        if method_name in self.group_items:
+            current_item = self.dtypes[method_name](item.text())
+            previous_item = self.dtypes[method_name](self.group_items[method_name])
+            self.group_items[method_name] = current_item
+
+            current_item.register_dependency(self)
+            previous_item.unregister_dependency(self)
+
 
     def add_field(self, word_name, item_type, value):
         word_name = word_style(word_name)
@@ -147,10 +172,13 @@ class FormItem(QStandardItem):
             self.widgets[word_name] = \
                 lambda grp=item_type, **kwargs: MyComboBox(grp, **kwargs), "currentText", "set_current_text"
         elif isinstance(item_type, GroupItem):
-            value = item_type.items_list()[0].text()
-            self.dtypes[method_name] = lambda i_name, grp=item_type: grp.item_from_name(i_name)
+            group = item_type
+            value = group.items_list()[0].text()
+            self.dtypes[method_name] = lambda i_name, grp=group: grp.item_from_name(i_name)
             self.widgets[word_name] = \
-                lambda grp=item_type, **kwargs: ItemsComboBox(grp, **kwargs), "currentText", "set_current_text"
+                lambda grp=group, **kwargs: ItemsComboBox(grp, **kwargs), "currentText", "set_current_text"
+            self.group_items[method_name] = value
+            group.item_from_name(value).register_dependency(self)
         self.val_items[method_name] = QStandardItem(str(value))
         self.params_model.appendRow([ConstantItem(word_name), self.val_items[method_name]])
         self.method_names.append(method_name)
@@ -247,6 +275,7 @@ class GroupItem(ConstantItem):
         self.item_class = item_class
         self.emitter = GroupItemEmitter()
         self.setup = setup
+        self.current_items = []
 
     def add_item(self, dialog=True):
         try:
@@ -263,9 +292,15 @@ class GroupItem(ConstantItem):
                 return None
             else:
                 i.params_widget.setParent(None)
+        self.current_items.append(i)
         self.appendRow(i)
         self.emitter.item_added.emit(i)
         return i
+
+    def remove_item(self, item):
+        idx = self.current_items.index(item)
+        self.current_items.pop(idx)
+        self.removeRow(idx)
 
     def items_list(self):
         return [self.child(i) for i in range(self.rowCount())]
@@ -274,6 +309,30 @@ class GroupItem(ConstantItem):
         for i in self.items_list():
             if str(i.text()) == name:
                 return i
+
+class GroupItemChild(FormItem):
+    def __init__(self, name, fields, group):
+        super(GroupItemChild, self).__init__(name, fields)
+        self.group = group
+        self.context_menu.add_action("Delete", self.delete_self)
+        self.dependents = []
+
+    def delete_self(self):
+        if self.dependents:
+            dependents_str = ",".join([i.name() for i in self.dependents])
+            error_message("Cannot delete %s:\n%s depends on it" % (self.name(), dependents_str))
+            return
+        self.params_widget.setParent(None)
+        self.group.remove_item(self)
+
+    def register_dependency(self, other):
+        if other not in self.dependents:
+            self.dependents.append(other)
+        print 'register', self, other
+
+    def unregister_dependency(self, other):
+        self.dependents.remove(other)
+        print 'unregister', self, other
 
 
 class ContextMenuStandardTreeView(QTreeView):
