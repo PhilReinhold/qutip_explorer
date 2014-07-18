@@ -1,6 +1,8 @@
+import ast
 from PyQt4.QtCore import QAbstractTableModel, Qt, pyqtSignal, QObject, QPoint
 from PyQt4.QtGui import QStandardItem, QComboBox, QSpinBox, QDoubleSpinBox, QCheckBox, QStandardItemModel, QTableView, \
-    QStyledItemDelegate, QMenu, QAction, QDialog, QVBoxLayout, QDialogButtonBox, QTreeView, QLabel, QPixmap, QMessageBox
+    QStyledItemDelegate, QMenu, QAction, QDialog, QVBoxLayout, QDialogButtonBox, QTreeView, QLabel, QPixmap, QMessageBox, \
+    QLineEdit
 
 
 def print_fn(*s):
@@ -115,11 +117,73 @@ class ItemsComboBox(MyComboBox):
     def get_item(self):
         return self.items_list[self.currentIndex()]
 
+class VarLineEdit(QLineEdit):
+    variable_added = pyqtSignal(str)
+    value_changed = pyqtSignal(float)
+    spinbox = QDoubleSpinBox
+    def __init__(self, variables):
+        self.variables = variables
+        super(VarLineEdit, self).__init__()
+        self.value_text = "0"
+
+    def check_variables(self):
+        text = str(self.text())
+        try:
+            self.set_value(int(text))
+        except ValueError:
+            try:
+                expr = ast.parse(text)
+            except SyntaxError:
+                # TODO: Error Message Box
+                raise
+            for item in ast.walk(expr):
+                if isinstance(item, ast.Name):
+                    var_name = item.id
+                    if var_name not in self.variables:
+                        if not self.new_variable_dialog(var_name):
+                            self.reject()
+
+    def evaluate(self):
+        text = str(self.text())
+        try:
+            return str(int(text)), ""
+        except ValueError:
+            return text, eval(text, self.variables)
+
+    def set_value(self, value):
+        self.value_text = str(self.text())
+        self.value = value
+        self.value_changed.emit(value)
+
+    def reject(self):
+        self.setText(self.value_text)
+
+    def new_variable_dialog(self, var_name):
+        dialog = QDialog()
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        button_box.accepted.connect(dialog.accept)
+        button_box.rejected.connect(dialog.reject)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel("Create Variable %s" % var_name))
+        spinbox = self.spinbox()
+        layout.addWidget(spinbox)
+        layout.addWidget(button_box)
+        if dialog.exec_():
+            self.variables[var_name] = spinbox.value()
+            print self.variables
+            #self.variable_added.emit(var_name)
+            return True
+        return False
+
+class IntVarLineEdit(VarLineEdit):
+    spinbox = QSpinBox
+    value_changed = pyqtSignal(int)
+
 
 # TODO: Variables system for FormItems
 # TODO: Copy/Paste system for FormItems/GroupItems
 class FormItem(QStandardItem):
-    def __init__(self, name, fields):
+    def __init__(self, name, fields, setup):
         super(FormItem, self).__init__(name)
         fields = [("Name", str, name)] + fields
         self.name = lambda: str(self.text())
@@ -127,14 +191,16 @@ class FormItem(QStandardItem):
         self.dtypes = {}
         self.widgets = {}
         self.method_names = []
-        self.val_items = {method_style(n): QStandardItem(str(v)) for n, _, v in fields}
+        self.val_items = {}
+        self.expr_items = {}
         self.group_items = {}
+        self.setup = setup
         self.params_model = QStandardItemModel()
         self.params_model.itemChanged.connect(self.update_name)
+        self.params_model.setHorizontalHeaderLabels(["Name", "Formula", "Evaluated"])
         self.params_widget = QTableView()
         self.params_widget.setModel(self.params_model)
         self.params_widget.setItemDelegate(FormDelegate(self.params_model, self.widgets))
-        self.params_widget.horizontalHeader().hide()
         self.params_widget.verticalHeader().hide()
 
         for name, item_type, default in fields:
@@ -160,27 +226,28 @@ class FormItem(QStandardItem):
         method_name = method_style(word_name)
         if item_type is int:
             self.dtypes[method_name] = int
-            self.widgets[word_name] = MySpinBox, "value", "setValue"
+            self.widgets[word_name] = lambda: IntVarLineEdit(self.setup.variables)
         elif item_type is float:
             self.dtypes[method_name] = float
-            self.widgets[word_name] = QDoubleSpinBox, "value", "setValue"
+            self.widgets[word_name] = lambda: VarLineEdit(self.setup.variables)
         elif isinstance(item_type, bool):
             self.dtypes[method_name] = bool
-            self.widgets[word_name] = QCheckBox, "isChecked", "setChecked"
+            self.widgets[word_name] = QCheckBox
         elif isinstance(item_type, (list, tuple)):
             self.dtypes[method_name] = str
             self.widgets[word_name] = \
-                lambda grp=item_type, **kwargs: MyComboBox(grp, **kwargs), "currentText", "set_current_text"
+                lambda grp=item_type, **kwargs: MyComboBox(grp, **kwargs)
         elif isinstance(item_type, GroupItem):
             group = item_type
             value = group.items_list()[0].text()
             self.dtypes[method_name] = lambda i_name, grp=group: grp.item_from_name(i_name)
             self.widgets[word_name] = \
-                lambda grp=group, **kwargs: ItemsComboBox(grp, **kwargs), "currentText", "set_current_text"
+                lambda grp=group, **kwargs: ItemsComboBox(grp, **kwargs)
             self.group_items[method_name] = value
             group.item_from_name(value).register_dependency(self)
-        self.val_items[method_name] = QStandardItem(str(value))
-        self.params_model.appendRow([ConstantItem(word_name), self.val_items[method_name]])
+        self.expr_items[method_name] = QStandardItem(str(value))
+        self.val_items[method_name] = ConstantItem("")
+        self.params_model.appendRow([ConstantItem(word_name), self.expr_items[method_name], self.val_items[method_name]])
         self.method_names.append(method_name)
 
     def set_name(self, name):
@@ -211,11 +278,23 @@ class FormDelegate(QStyledItemDelegate):
             name = str(self.model.itemFromIndex(idx.sibling(idx.row(), 0)).text())
             self.item_editor_activated.emit(name)
             if name in self.widgets_dict:
-                w = self.widgets_dict[name][0]()
+                w = self.widgets_dict[name]()
                 w.setParent(parent)
                 return w
 
         return super(FormDelegate, self).createEditor(parent, style, idx)
+
+    def setModelData(self, editor, model, idx):
+        if isinstance(editor, VarLineEdit):
+            editor.check_variables()
+            editor_text, eval_text = editor.evaluate()
+            model.setData(idx, editor_text, Qt.DisplayRole)
+            eval_idx = model.index(idx.row(), 2)
+            model.setData(eval_idx, eval_text, Qt.DisplayRole)
+        else:
+            super(FormDelegate, self).setModelData(editor, model, idx)
+
+
 
 
 class ActionsMenu(QMenu):
@@ -269,33 +348,32 @@ class GroupItemEmitter(QObject):
 
 
 class GroupItem(ConstantItem):
-    def __init__(self, group_name, item_name, item_class, setup=None):
+    def __init__(self, group_name, child_classes, setup):
         super(GroupItem, self).__init__(group_name)
-        self.context_menu = ActionsMenu([('Add ' + item_name, self.add_item)])
-        self.item_class = item_class
+        self.child_classes = child_classes
+        self.context_menu = ActionsMenu([('Add ' + name, lambda c=cls: self.add_item(c)) for name, cls in child_classes])
         self.emitter = GroupItemEmitter()
         self.setup = setup
         self.current_items = []
 
-    def add_item(self, dialog=True):
-        try:
-            i = self.item_class()
-        except TypeError:
-            i = self.item_class(self)
+    def add_item(self, cls=None, dialog=True):
+        if cls is None:
+            cls = self.child_classes[0][1]
+        child = cls(self)
         child_texts = [self.child(n).text() for n in range(self.rowCount())]
-        self.emitter.item_created.emit(i)
-        while i.text() in child_texts:
-            i.set_name(increment_name(str(i.text())))
-        if dialog and hasattr(i, 'params_widget'):
-            d = OKCancelDialog(i.params_widget)
+        self.emitter.item_created.emit(child)
+        while child.text() in child_texts:
+            child.set_name(increment_name(str(child.text())))
+        if dialog and hasattr(child, 'params_widget'):
+            d = OKCancelDialog(child.params_widget)
             if not d.exec_():
                 return None
             else:
-                i.params_widget.setParent(None)
-        self.current_items.append(i)
-        self.appendRow(i)
-        self.emitter.item_added.emit(i)
-        return i
+                child.params_widget.setParent(None)
+        self.current_items.append(child)
+        self.appendRow(child)
+        self.emitter.item_added.emit(child)
+        return child
 
     def remove_item(self, item):
         idx = self.current_items.index(item)
@@ -312,12 +390,15 @@ class GroupItem(ConstantItem):
 
 class GroupItemChild(FormItem):
     def __init__(self, name, fields, group):
-        super(GroupItemChild, self).__init__(name, fields)
-        self.group = group
-        self.context_menu.add_action("Delete", self.delete_self)
         self.dependents = []
+        self.dependencies = []
+        self.group = group
+        super(GroupItemChild, self).__init__(name, fields, group.setup)
+        self.context_menu.add_action("Delete", self.delete_self)
 
     def delete_self(self):
+        for other in self.dependencies:
+            other.unregister_dependency(self)
         if self.dependents:
             dependents_str = ",".join([i.name() for i in self.dependents])
             error_message("Cannot delete %s:\n%s depends on it" % (self.name(), dependents_str))
@@ -326,13 +407,15 @@ class GroupItemChild(FormItem):
         self.group.remove_item(self)
 
     def register_dependency(self, other):
+        print 'register', self, other
         if other not in self.dependents:
             self.dependents.append(other)
-        print 'register', self, other
+        if self not in other.dependencies:
+            other.dependencies.append(self)
 
     def unregister_dependency(self, other):
-        self.dependents.remove(other)
         print 'unregister', self, other
+        self.dependents.remove(other)
 
 
 class ContextMenuStandardTreeView(QTreeView):

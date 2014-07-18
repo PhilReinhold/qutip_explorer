@@ -96,7 +96,7 @@ class ModeItem(GroupItemChild):
 
 class ModesGroupItem(GroupItem):
     def __init__(self, setup):
-        super(ModesGroupItem, self).__init__("Modes", "Mode", ModeItem, setup)
+        super(ModesGroupItem, self).__init__("Modes", [("Mode", ModeItem)], setup)
 
     def operator_on_indices(self, h_idx_pairs):
         op_list = [qeye(m.dimension) for m in self.items_list()]
@@ -110,7 +110,7 @@ class ModesGroupItem(GroupItem):
 
 class CrossModeGroupItem(GroupItem):
     def __init__(self, setup):
-        super(CrossModeGroupItem, self).__init__("Cross-Mode Terms", "Cross-Mode Term", CrossModeItem, setup)
+        super(CrossModeGroupItem, self).__init__("Cross-Mode Terms", [("Cross-Mode Term", CrossModeItem)], setup)
         self.context_menu.add_action('Add Terms From Matrix', self.add_from_matrix)
 
         self.array_model = UpperHalfArrayModel()
@@ -174,7 +174,7 @@ class CrossModeItem(GroupItemChild):
 
 class OutputsGroupItem(GroupItem):
     def __init__(self, setup):
-        super(OutputsGroupItem, self).__init__("Outputs", "Output", OutputItem, setup)
+        super(OutputsGroupItem, self).__init__("Outputs", [("Output", OutputItem)], setup)
 
 class MyImageView(ImageView):
     def __init__(self):
@@ -298,7 +298,7 @@ class PulseItem(GroupItemChild):
 
 class SequencesGroupItem(GroupItem):
     def __init__(self, setup):
-        super(SequencesGroupItem, self).__init__("Pulse Sequences", "Sequence", SequenceItem, setup)
+        super(SequencesGroupItem, self).__init__("Pulse Sequences", [("Sequence", SequenceItem)], setup)
 
 
 class SequenceItem(GroupItemChild):
@@ -346,7 +346,7 @@ class SequenceItem(GroupItemChild):
 
 class SimulationsGroupItem(GroupItem):
     def __init__(self, setup):
-        super(SimulationsGroupItem, self).__init__("Analysis", "Simulation", SimulationItem, setup)
+        super(SimulationsGroupItem, self).__init__("Analysis", [("Simulation", SimulationItem)], setup)
 
 # TODO: Better name than Simulation
 # TODO: Simple Simulations & Sequence Simulations
@@ -388,10 +388,11 @@ class SimulationItem(GroupItemChild):
 # TODO: Parametric Sweep Group
 class SetupItem(FormItem):
     def __init__(self):
-        super(SetupItem, self).__init__("Setup", [])
+        super(SetupItem, self).__init__("Setup", [], self)
+        self.variables = {}
         self.modes_item = ModesGroupItem(self)
         self.cross_mode_terms_item = CrossModeGroupItem(self)
-        self.pulses_item = GroupItem("Pulses", "Pulse", PulseItem, self)
+        self.pulses_item = GroupItem("Pulses", [("Pulse", PulseItem)], self)
         self.sequences_item = SequencesGroupItem(self)
         self.sims_item = SimulationsGroupItem(self)
         self.outputs_item = OutputsGroupItem(self)
