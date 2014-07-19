@@ -386,6 +386,22 @@ class SimulationItem(GroupItemChild):
             win.set_status("")
             self.dirty = False
 
+class SweepsGroupItem(GroupItem):
+    def __init__(self, setup):
+        super(SweepsGroupItem, self).__init__(
+            "Sweeps", [("Parameter Sweep", SweepItem)], setup
+        )
+
+class SweepItem(GroupItemChild):
+    def __init__(self, group):
+        param_names = [v.name for v in group.setup.variables.values()]
+        super(SweepItem, self).__init__("Sweep_1", [
+            ("Parameter Name", param_names, param_names[0]),
+            ("Initial value", float, 0),
+            ("Final value", float, 1),
+            ("Steps", int, 10)
+        ], group)
+
 # TODO: Parametric Sweep Group
 class SetupItem(VarRootItem):
     def __init__(self):
@@ -396,6 +412,7 @@ class SetupItem(VarRootItem):
         self.pulses_item = GroupItem("Pulses", [("Pulse", PulseItem)], self)
         self.sequences_item = SequencesGroupItem(self)
         self.sims_item = SimulationsGroupItem(self)
+        self.sweeps_item = SweepsGroupItem(self)
         self.outputs_item = OutputsGroupItem(self)
 
         self.appendRow(self.modes_item)
@@ -403,6 +420,7 @@ class SetupItem(VarRootItem):
         self.appendRow(self.pulses_item)
         self.appendRow(self.sequences_item)
         self.appendRow(self.sims_item)
+        self.appendRow(self.sweeps_item)
         self.appendRow(self.outputs_item)
 
         self.modes_item.add_item(dialog=False)
