@@ -260,7 +260,10 @@ class FormItem(QStandardItem):
     def __getattr__(self, item):
         if item in self.method_names:
             dtype = self.dtypes[item]
-            return dtype(self.val_items[item].text())
+            text = self.val_items[item].text()
+            if text == "":
+                text = self.expr_items[item].text()
+            return dtype(text)
         else:
             raise AttributeError(item)
 
