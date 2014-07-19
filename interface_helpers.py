@@ -121,25 +121,28 @@ class VarLineEdit(QLineEdit):
     variable_added = pyqtSignal(str)
     value_changed = pyqtSignal(float)
     spinbox = QDoubleSpinBox
-    def __init__(self, variables):
-        self.variables = variables
+    def __init__(self, var_root):
+        self.var_root = var_root
         super(VarLineEdit, self).__init__()
         self.value_text = "0"
 
-    def check_variables(self):
+    def check_variables(self, prop_items=None):
         text = str(self.text())
         try:
             self.set_value(int(text))
+            self.var_root.dependent_props.discard(prop_items)
         except ValueError:
             try:
                 expr = ast.parse(text)
             except SyntaxError:
                 # TODO: Error Message Box
                 raise
+            if prop_items is not None:
+                self.var_root.dependent_props.add(prop_items)
             for item in ast.walk(expr):
                 if isinstance(item, ast.Name):
                     var_name = item.id
-                    if var_name not in self.variables:
+                    if var_name not in self.var_root.variables:
                         if not self.new_variable_dialog(var_name):
                             self.reject()
 
@@ -148,7 +151,7 @@ class VarLineEdit(QLineEdit):
         try:
             return str(int(text)), ""
         except ValueError:
-            return text, eval(text, self.variables)
+            return text, self.var_root.evaluate_formula(text)
 
     def set_value(self, value):
         self.value_text = str(self.text())
@@ -169,16 +172,13 @@ class VarLineEdit(QLineEdit):
         layout.addWidget(spinbox)
         layout.addWidget(button_box)
         if dialog.exec_():
-            self.variables[var_name] = spinbox.value()
-            print self.variables
-            #self.variable_added.emit(var_name)
+            self.var_root.add_variable(var_name, float, spinbox.value())
             return True
         return False
 
 class IntVarLineEdit(VarLineEdit):
     spinbox = QSpinBox
     value_changed = pyqtSignal(int)
-
 
 # TODO: Variables system for FormItems
 # TODO: Copy/Paste system for FormItems/GroupItems
@@ -226,10 +226,10 @@ class FormItem(QStandardItem):
         method_name = method_style(word_name)
         if item_type is int:
             self.dtypes[method_name] = int
-            self.widgets[word_name] = lambda: IntVarLineEdit(self.setup.variables)
+            self.widgets[word_name] = lambda: IntVarLineEdit(self.setup)
         elif item_type is float:
             self.dtypes[method_name] = float
-            self.widgets[word_name] = lambda: VarLineEdit(self.setup.variables)
+            self.widgets[word_name] = lambda: VarLineEdit(self.setup)
         elif isinstance(item_type, bool):
             self.dtypes[method_name] = bool
             self.widgets[word_name] = QCheckBox
@@ -257,7 +257,7 @@ class FormItem(QStandardItem):
     def update_name(self):
         self.setText(self.params_model.item(0, 1).text())
 
-    def __getattr__(self, item):
+    def eval_item(self, item):
         if item in self.method_names:
             dtype = self.dtypes[item]
             text = self.val_items[item].text()
@@ -266,6 +266,90 @@ class FormItem(QStandardItem):
             return dtype(text)
         else:
             raise AttributeError(item)
+
+    def __getattr__(self, item):
+        return self.eval_item(item)
+
+
+class Formula(object):
+    def __init__(self, text):
+        self.text = text
+
+    def dependencies(self):
+        return set([s.id for s in ast.walk(ast.parse(self.text)) if isinstance(s, ast.Name)])
+
+    def evaluate(self, context):
+        return eval(self.text, context)
+
+
+def check_contexts(c1, c2):
+    for key, val in c2.items():
+        if c1.get(key, val) != val:
+            raise ValueError("Context clash %s %s %s" % (key, c1[key], c2[key]))
+
+
+class VarDAG(object):
+    def __init__(self, name, formula, vars, stack=None):
+        self.name = name
+        if not isinstance(formula, Formula):
+            formula = Formula(formula)
+        self.formula = formula
+
+        if stack is None:
+            stack = []
+        deps = formula.dependencies()
+        if any(d in stack for d in deps):
+            raise ValueError("Cycle Detected")
+        self.children = [VarDAG(dep, vars[dep].formula, vars, stack+[dep]) for dep in deps]
+
+    def generate_context(self):
+        context = {}
+        for c in self.children:
+            child_context = c.generate_context()
+            check_contexts(context, child_context)
+            context.update(child_context)
+        context[self.name] = self.formula.evaluate(context)
+        return context
+
+    def evaluate(self):
+        return self.generate_context()[self.name]
+
+    def depth(self):
+        if not self.children:
+            return 0
+        else:
+            return 1 + max(c.depth for c in self.children)
+
+
+class VarRootItem(FormItem):
+    def __init__(self, name):
+        super(VarRootItem, self).__init__(name, [], self)
+        self.variables = {}
+        self.dependent_props = set()
+        self.params_model.itemChanged.connect(self.variable_changed)
+
+    def add_variable(self, name, type, value):
+        self.variables[name] = VarDAG(name, str(value), self.variables)
+        self.add_field(name, type, value)
+
+    def variable_changed(self, idx):
+        name = method_style(self.params_model.item(idx.row(), 0).text())
+        formula = str(self.params_model.item(idx.row(), 1).text())
+        self.variables[name] = VarDAG(name, formula, self.variables)
+
+        # First force evaluation all variables
+        # TODO: caching
+        for var, dag in self.variables.items():
+            self.val_items[var].setText(str(dag.evaluate()))
+
+        # Next reevaluate all parameterized properties
+        for expr_item, eval_item in self.dependent_props:
+            formula = str(expr_item.text())
+            val = self.evaluate_formula(formula)
+            eval_item.setText(str(val))
+
+    def evaluate_formula(self, formula):
+        return VarDAG("__formula__", formula, self.variables).evaluate()
 
 
 class FormDelegate(QStyledItemDelegate):
@@ -289,7 +373,8 @@ class FormDelegate(QStyledItemDelegate):
 
     def setModelData(self, editor, model, idx):
         if isinstance(editor, VarLineEdit):
-            editor.check_variables()
+            prop_items = model.item(idx.row(), 1), model.item(idx.row(), 2)
+            editor.check_variables(prop_items)
             editor_text, eval_text = editor.evaluate()
             model.setData(idx, editor_text, Qt.DisplayRole)
             eval_idx = model.index(idx.row(), 2)
@@ -410,14 +495,12 @@ class GroupItemChild(FormItem):
         self.group.remove_item(self)
 
     def register_dependency(self, other):
-        print 'register', self, other
         if other not in self.dependents:
             self.dependents.append(other)
         if self not in other.dependencies:
             other.dependencies.append(self)
 
     def unregister_dependency(self, other):
-        print 'unregister', self, other
         self.dependents.remove(other)
 
 

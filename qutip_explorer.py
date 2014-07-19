@@ -359,6 +359,7 @@ class SimulationItem(GroupItemChild):
         ], group)
         self.dirty = True
         self.states = None
+        self.context_menu.add_action("Compute", lambda: self.group.setup.compute(self))
 
     def compute(self, h0, init_state, collapse_ops):
         self.states = []
@@ -386,9 +387,9 @@ class SimulationItem(GroupItemChild):
             self.dirty = False
 
 # TODO: Parametric Sweep Group
-class SetupItem(FormItem):
+class SetupItem(VarRootItem):
     def __init__(self):
-        super(SetupItem, self).__init__("Setup", [], self)
+        super(SetupItem, self).__init__("Setup")
         self.variables = {}
         self.modes_item = ModesGroupItem(self)
         self.cross_mode_terms_item = CrossModeGroupItem(self)
@@ -403,11 +404,6 @@ class SetupItem(FormItem):
         self.appendRow(self.sequences_item)
         self.appendRow(self.sims_item)
         self.appendRow(self.outputs_item)
-
-        def add_compute_action(item):
-            item.context_menu.add_action("Compute", lambda: self.compute(item))
-
-        self.sims_item.emitter.item_added.connect(add_compute_action)
 
         self.modes_item.add_item(dialog=False)
         self.pulses_item.add_item(dialog=False)
