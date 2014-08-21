@@ -1,10 +1,11 @@
-from PyQt4.QtCore import QSettings
+from PyQt4.QtCore import QSettings, QTimer
 from PyQt4.QtGui import QApplication, QMainWindow, QProgressBar, QGroupBox, QRadioButton, QDockWidget, QWidget, \
-    QHBoxLayout, QPushButton, QMessageBox
+    QHBoxLayout, QPushButton, QMessageBox, QIcon, QSlider
 import itertools
 from numpy import linspace
 from pyqtgraph import ImageView, PlotWidget, setConfigOption, mkPen
 from pyqtgraph.dockarea import DockArea, Dock
+from pyqtgraph.graphicsItems.InfiniteLine import InfiniteLine
 from qutip import *
 from interface_helpers import *
 
@@ -14,7 +15,7 @@ __ui_version__ = 1
 setConfigOption('background', 'w')
 setConfigOption('foreground', 'k')
 pen_list = [mkPen(color, width=2) for color in 'bgrcmyk']
-pen_generator = itertools.cycle(pen_list)
+pen_generator = lambda: itertools.cycle(pen_list)
 
 class ModeItemEmitter(QObject):
     mode_form_focus_in = pyqtSignal(str)
@@ -182,11 +183,42 @@ class MyImageView(ImageView):
         self.ui.histogram.gradient.restoreState(
             {"ticks": [(0.0, (255, 0, 0)), (0.5, (255, 255, 255)), (1.0, (0, 0, 255))], "mode": "rgb"}
         )
+        self.h_line = InfiniteLine(pos=0, angle=0)
+        self.v_line = InfiniteLine(pos=0, angle=90)
+        self.view.addItem(self.h_line)
+        self.view.addItem(self.v_line)
+        win.time_slider.valueChanged.connect(self.set_time)
 
     def setImage(self, img, **kwargs):
         super(MyImageView, self).setImage(img, **kwargs)
+        self.v_line.setPos(img.shape[1]/2.)
+        self.h_line.setPos(img.shape[2]/2.)
         max_value = abs(img).max()
         self.setLevels(-max_value, max_value)
+        win.time_slider.setMaximum(len(kwargs['xvals'])-1)
+
+    def set_time(self, time_idx):
+        self.setCurrentIndex(time_idx)
+
+
+class TimePlot(PlotWidget):
+    def __init__(self, *args, **kwargs):
+        super(TimePlot, self).__init__(*args, **kwargs)
+        self.add_line()
+        win.time_slider.valueChanged.connect(self.set_time)
+
+    def add_line(self):
+        self.time_vline = InfiniteLine(angle=90)
+        self.addItem(self.time_vline)
+
+    def plot(self, x, *args, **kwargs):
+        self.time_pts = x
+        win.time_slider.setMaximum(len(self.time_pts)-1)
+        self.plotItem.plot(x, *args, **kwargs)
+
+    def set_time(self, time_idx):
+        pos = self.time_pts[time_idx]
+        self.time_vline.setPos(pos)
 
 
 class OutputItem(GroupItemChild):
@@ -236,7 +268,7 @@ class OutputItem(GroupItemChild):
     def plot_type(self):
         return {
             "Wigner": MyImageView,
-            "Expect-XYZ": PlotWidget,
+            "Expect-XYZ": TimePlot,
         }[self.report_type]
 
     def check_dock(self):
@@ -252,17 +284,22 @@ class OutputItem(GroupItemChild):
     def plot_wigner(self):
         if not isinstance(self.plot, ImageView):
             self.check_dock()
-        self.plot.setImage(self.data)
+        self.plot.setImage(self.data, xvals=array(self.simulation.times))
 
     # TODO: Bloch/XYZ plot output implementation
     def plot_xyz(self):
         if not isinstance(self.plot, PlotWidget):
             self.check_dock()
         self.plot.clear()
+        self.plot.add_line()
         self.plot.addLegend()
-        for trace, name, pen in zip(self.data.transpose(), 'XYZ', pen_generator):
+        for trace, name, pen in zip(self.data.transpose(), 'XYZ', pen_generator()):
             self.plot.plot(self.simulation.times, trace, pen=pen, name=name)
 
+class PulseGroupItem(GroupItem):
+    def __init__(self, setup):
+        super(PulseGroupItem, self).__init__("Pulses", [("Pulse", PulseItem)], setup)
+        #self.setIcon(QIcon("icons/pulse.png"))
 
 class PulseItem(GroupItemChild):
     def __init__(self, group):
@@ -409,7 +446,7 @@ class SetupItem(VarRootItem):
         self.variables = {}
         self.modes_item = ModesGroupItem(self)
         self.cross_mode_terms_item = CrossModeGroupItem(self)
-        self.pulses_item = GroupItem("Pulses", [("Pulse", PulseItem)], self)
+        self.pulses_item = PulseGroupItem(self)
         self.sequences_item = SequencesGroupItem(self)
         self.sims_item = SimulationsGroupItem(self)
         self.sweeps_item = SweepsGroupItem(self)
@@ -494,6 +531,14 @@ class MainWindow(QMainWindow):
         self.eqn_widget = ResizableImage("latex/eqn.png", 100, .5, 2)
         self.outputs_dock_area = DockArea()
 
+        file_menu = self.menuBar().addMenu("File")
+        save_action = QAction("Save", self)
+        save_action.triggered.connect(self.save_configuration)
+        file_menu.addAction(save_action)
+        load_action = QAction("Load", self)
+        load_action.triggered.connect(self.load_configuration)
+        file_menu.addAction(load_action)
+
         docks = []
         view_menu = self.menuBar().addMenu("View")
         for dock_name in ["Project Manager", "Properties", "Equation"]:
@@ -525,6 +570,11 @@ class MainWindow(QMainWindow):
         self.statusBar().addWidget(self.status_label)
         self.statusBar().addWidget(self.progress_bar, 1)
 
+        time_toolbar = self.addToolBar("Time")
+        time_toolbar.addWidget(QLabel("Time"))
+        self.time_slider = QSlider(Qt.Horizontal)
+        time_toolbar.addWidget(self.time_slider)
+
         self.restoreGeometry(settings.value("geometry").toByteArray())
         self.restoreState(settings.value("state").toByteArray(), __ui_version__)
 
@@ -552,6 +602,12 @@ class MainWindow(QMainWindow):
         settings.setValue("state", self.saveState(__ui_version__))
         return super(MainWindow, self).closeEvent(ev)
 
+    def save_configuration(self):
+        pass
+
+    def load_configuration(self):
+        pass
+
 
 if __name__ == '__main__':
     app = QApplication([])
@@ -560,4 +616,6 @@ if __name__ == '__main__':
     win.show()
     win.resize(1000, 800)
     message_box = QMessageBox()
+    timer = QTimer()
+    timer.singleShot(1, lambda: win.raise_())
     sys.exit(app.exec_())
